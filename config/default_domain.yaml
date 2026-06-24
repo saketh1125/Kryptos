@@ -1,0 +1,24 @@
+domain: "example_hyperlocal_domain"
+geography_bbox: [25.268, 82.980, 25.350, 83.030]
+coverage_target: 0.8
+staleness_cutoff_days:
+  regulatory_rule: 7
+  public_event: 1
+  local_business: 30
+  landmark: 90
+entity_types:
+  - name: "landmark"
+    strategies: ["osm_api", "specialized_wikis", "media_transcripts"]
+    safety_relevant: false
+  - name: "local_business"
+    strategies: ["business_directories", "web_crawls", "social_media_crawls"]
+    safety_relevant: false
+  - name: "public_event"
+    strategies: ["official_portals", "news_feeds", "social_media_crawls"]
+    safety_relevant: false
+  - name: "transit_route"
+    strategies: ["osm_api", "official_portals", "web_crawls"]
+    safety_relevant: false
+  - name: "regulatory_rule"
+    strategies: ["official_portals", "news_feeds"]
+    safety_relevant: true

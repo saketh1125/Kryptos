@@ -1,0 +1,68 @@
+[project]
+name = "ghkge"
+version = "0.1.0"
+description = "Generalized Hyperlocal Knowledge Graph Engine"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "asyncpg>=0.30.0",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "httpx>=0.27.0",
+    "aiohttp>=3.10.0",
+    "instructor>=1.0.0",
+    "openai>=1.0.0",
+    "rapidfuzz>=3.0.0",
+    "neo4j>=5.0.0",
+    "pgvector>=0.3.0",
+    "python-robotparser>=0.1.0",
+    "pyyaml>=6.0",
+    "structlog>=24.0.0",
+    "apscheduler>=3.10.0",
+    "tenacity>=8.0.0",
+    "cryptography>=42.0.0",
+]
+
+[project.optional-dependencies]
+crawl = [
+    "crawl4ai>=0.3.0",
+]
+doc = [
+    "docling>=2.0.0",
+]
+media = [
+    "faster-whisper>=1.0.0",
+    "yt-dlp>=2024.0.0",
+]
+all = [
+    "ghkge[crawl,doc,media]",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.5.0",
+    "mypy>=1.10.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "ASYNC"]
+ignore = ["B008"]  # FastAPI Depends() in function signatures is standard pattern
+
+[tool.ruff.lint.per-file-ignores]
+"ghkge/database/models.py" = ["E501"]  # SQLAlchemy column definitions are naturally long
+"ghkge/synthesis/refiner.py" = ["E501"]  # Prompt strings are naturally long
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
