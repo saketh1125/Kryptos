@@ -8,7 +8,7 @@ import structlog
 
 from ghkge.config.settings import settings
 from ghkge.harvesters.base import BaseHarvester
-from ghkge.models.schemas import RawCaptureData
+from ghkge.models.schemas import ApprovedTarget, RawCaptureData
 
 logger = structlog.get_logger()
 
@@ -24,34 +24,34 @@ def _get_semaphore() -> asyncio.Semaphore:
 
 
 class WebHarvester(BaseHarvester):
-    """HTML/Web harvester using httpx with crawl4ai as optional failover."""
+    """HTML/Web harvester using httpx (crawl4ai optional failover, future)."""
 
-    async def fetch(self, url: str, run_id: uuid.UUID, **kwargs: object) -> RawCaptureData | None:
-        compliance_result = await self._check_compliance(
-            url, strategy="web_crawl", entity_type=kwargs.get("entity_type", "")
-        )
+    async def fetch(self, target: ApprovedTarget, run_id: uuid.UUID) -> RawCaptureData | None:
+        compliance_result = await self._check_compliance(target)
         if not compliance_result.allowed:
-            logger.info("web_harvester.blocked", url=url, reason=compliance_result.reason)
+            logger.info(
+                "web_harvester.blocked", url=target.url, reason=compliance_result.reason
+            )
             return None
 
         sem = _get_semaphore()
         async with sem:
             try:
-                content = await self._fetch_html(url)
+                content = await self._fetch_html(target.url)
                 if content is None:
                     return None
 
                 return RawCaptureData(
-                    source_url=url,
+                    source_url=target.url,
                     source_type="html",
-                    domain=self.extract_domain(url),
+                    domain=self.extract_domain(target.url),
                     raw_content=content,
                     content_hash=self.compute_content_hash(content),
-                    strategy_used="web_crawl",
+                    strategy_used=target.strategy,
                     run_id=run_id,
                 )
             except Exception:
-                logger.error("web_harvester.fetch_error", url=url, exc_info=True)
+                logger.error("web_harvester.fetch_error", url=target.url, exc_info=True)
                 return None
 
     async def _fetch_html(self, url: str) -> str | None:
@@ -72,7 +72,7 @@ class WebHarvester(BaseHarvester):
             return None
 
     def _html_to_markdown(self, html: str) -> str:
-        """Basic HTML to markdown conversion. For production, use crawl4ai."""
+        """Basic HTML to markdown conversion."""
         import re
 
         text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL)

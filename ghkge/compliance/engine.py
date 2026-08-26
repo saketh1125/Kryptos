@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import re
 import time
+from typing import Protocol
 from urllib.parse import urlparse
+from urllib.robotparser import RobotFileParser
 
 import httpx
-import robotparser
 import structlog
 
-from ghkge.compliance.rate_limiter import PostgresRateLimiter
 from ghkge.config.settings import settings
 from ghkge.models.schemas import ComplianceResult
 
@@ -33,14 +33,21 @@ BLOCKED_PLATFORMS = [
 ]
 
 
+class RateLimiter(Protocol):
+    """Minimal interface the compliance engine needs from a limiter."""
+
+    async def acquire(self, url: str, limit_interval_s: float = 2.0) -> bool: ...
+
+
 class RobotsCache:
     """Caches robots.txt parsers per domain with TTL."""
 
-    def __init__(self, ttl_hours: int = 24) -> None:
+    def __init__(self, ttl_hours: int = 24, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self.ttl_hours = ttl_hours
-        self._cache: dict[str, tuple[float, robotparser.RobotFileParser]] = {}
+        self._transport = transport
+        self._cache: dict[str, tuple[float, RobotFileParser]] = {}
 
-    async def get_or_fetch(self, url: str) -> robotparser.RobotFileParser:
+    async def get_or_fetch(self, url: str) -> RobotFileParser:
         parsed = urlparse(url)
         base_url = f"{parsed.scheme}://{parsed.netloc}"
         now = time.time()
@@ -50,23 +57,19 @@ class RobotsCache:
             if now - cached_time < self.ttl_hours * 3600:
                 return parser
 
-        rp = robotparser.RobotFileParser()
+        rp = RobotFileParser()
         robots_url = f"{base_url}/robots.txt"
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(
-                    robots_url, headers={"User-Agent": settings.user_agent}
-                )
+            async with httpx.AsyncClient(
+                timeout=10.0, transport=self._transport
+            ) as client:
+                resp = await client.get(robots_url, headers={"User-Agent": settings.user_agent})
                 if resp.status_code == 200:
                     rp.parse(resp.text.splitlines())
                 else:
                     # If robots.txt unavailable, block by default
                     rp.parse(["User-agent: *", "Disallow: /"])
-                    logger.warning(
-                        "robots.fetch_failed",
-                        url=robots_url,
-                        status=resp.status_code,
-                    )
+                    logger.warning("robots.fetch_failed", url=robots_url, status=resp.status_code)
         except Exception:
             rp.parse(["User-agent: *", "Disallow: /"])
             logger.warning("robots.fetch_error", url=robots_url, exc_info=True)
@@ -97,10 +100,10 @@ class DenylistChecker:
 class ComplianceEngine:
     """
     Deterministic compliance gate. Every URL must pass through this before fetching.
-    Returns ApprovedTarget on success, ComplianceResult with reason on failure.
+    Returns a ComplianceResult; callers construct ApprovedTarget on allowed=True.
     """
 
-    def __init__(self, rate_limiter: PostgresRateLimiter | None = None) -> None:
+    def __init__(self, rate_limiter: RateLimiter | None = None) -> None:
         self.robots_cache = RobotsCache(ttl_hours=settings.robots_cache_ttl_hours)
         self.denylist = DenylistChecker()
         self.rate_limiter = rate_limiter
@@ -111,18 +114,23 @@ class ComplianceEngine:
         strategy: str = "",
         entity_type: str = "",
     ) -> ComplianceResult:
-        # 1. robots.txt check
-        robots = await self.robots_cache.get_or_fetch(url)
-        if not robots.can_fetch(settings.user_agent, url):
-            logger.info("compliance.robots_disallow", url=url)
-            return ComplianceResult(allowed=False, reason="robots_disallow")
+        # 1. platform policy (cheap, before consuming any rate-limit slot)
+        if self.denylist.requires_official_api(url):
+            logger.info("compliance.api_only_platform", url=url)
+            return ComplianceResult(allowed=False, reason="api_only_platform")
 
         # 2. denylist check
         if self.denylist.matches(url):
             logger.info("compliance.denylisted", url=url)
             return ComplianceResult(allowed=False, reason="denylisted_domain")
 
-        # 3. rate gate
+        # 3. robots.txt check
+        robots = await self.robots_cache.get_or_fetch(url)
+        if not robots.can_fetch(settings.user_agent, url):
+            logger.info("compliance.robots_disallow", url=url)
+            return ComplianceResult(allowed=False, reason="robots_disallow")
+
+        # 4. rate gate (consumes the domain slot only when everything else passed)
         if self.rate_limiter is not None:
             allowed = await self.rate_limiter.acquire(url, settings.rate_limit_interval_s)
             if not allowed:
@@ -133,10 +141,24 @@ class ComplianceEngine:
                     retry_after=settings.rate_limit_interval_s,
                 )
 
-        # 4. platform policy
-        if self.denylist.requires_official_api(url):
-            logger.info("compliance.api_only_platform", url=url)
-            return ComplianceResult(allowed=False, reason="api_only_platform")
-
         logger.debug("compliance.approved", url=url, strategy=strategy)
         return ComplianceResult(allowed=True)
+
+    async def approve(
+        self,
+        url: str,
+        strategy: str,
+        entity_type: str,
+    ) -> ComplianceResult | None:
+        """Check a URL and return an ApprovedTarget when allowed, else None."""
+        result = await self.check(url, strategy=strategy, entity_type=entity_type)
+        if not result.allowed:
+            return None
+        from ghkge.models.schemas import ApprovedTarget
+
+        return ApprovedTarget(
+            url=url,
+            domain=urlparse(url).netloc,
+            strategy=strategy,
+            entity_type=entity_type,
+        )

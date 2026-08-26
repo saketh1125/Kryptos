@@ -38,6 +38,7 @@ class GapEntry(BaseModel):
     kind: str
     severity: float
     status: str = "open"
+    domain: str | None = None
     created_at: datetime
 
 
@@ -85,6 +86,11 @@ class DomainConfig(BaseModel):
     entity_types: list[EntityTypeConfig]
     coverage_target: float = 0.8
     staleness_cutoff_days: dict[str, int] = Field(default_factory=dict)
+    grid_precision: int = 6
+    strategy_seeds: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Seed URLs per strategy (public-access sources only)",
+    )
 
 
 class ComplianceResult(BaseModel):
@@ -235,3 +241,35 @@ class FeedbackRequest(BaseModel):
 class FeedbackResponse(BaseModel):
     feedback_id: uuid.UUID
     status: str = "queued_for_review"
+
+
+# --- Moderation (human-in-the-loop) ---
+
+
+class FactItem(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: uuid.UUID
+    raw_capture_id: uuid.UUID
+    canonical_entity_id: uuid.UUID | None = None
+    entity_name_raw: str
+    entity_category: str
+    contextual_insight: str
+    confidence_score: float
+    source_tier: int
+    is_safety_relevant: bool
+    resolution_status: str
+    extracted_at: datetime
+
+
+class FactListResponse(BaseModel):
+    facts: list[FactItem]
+
+
+class FactModerationRequest(BaseModel):
+    action: Literal["approve", "reject"]
+
+
+class FactModerationResponse(BaseModel):
+    fact_id: uuid.UUID
+    resolution_status: str

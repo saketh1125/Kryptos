@@ -3,10 +3,12 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import ARRAY, TIMESTAMP, Float, ForeignKey, Index, Integer, String, Text, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
+from ghkge.config.settings import settings
 from ghkge.database.connection import Base
 
 
@@ -20,6 +22,9 @@ class AcquisitionRun(Base):
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="running")
     trigger: Mapped[str] = mapped_column(String(50), nullable=False, default="scheduled")
     last_canonical_id_processed: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    facts_extracted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    entities_written: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    errors: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
 
     __table_args__ = (
         Index("idx_acquisition_runs_domain", "domain"),
@@ -59,6 +64,7 @@ class Entity(Base):
     last_verified: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
     neo4j_node_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
 
     __table_args__ = (
         Index("idx_entities_type_cell", "entity_type", "grid_cell"),
@@ -113,6 +119,7 @@ class GapQueue(Base):
     kind: Mapped[str] = mapped_column(String(50), nullable=False)
     severity: Mapped[float] = mapped_column(Float, nullable=False)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="open")
+    domain: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
 
     __table_args__ = (
@@ -135,6 +142,57 @@ class NarrativeChunk(Base):
     entity_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("entities.id", ondelete="CASCADE"), nullable=True)
     raw_capture_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("raw_captures.id", ondelete="CASCADE"), nullable=True)
     chunk_text: Mapped[str] = mapped_column(Text, nullable=False)
-    embedding: Mapped[str | None] = mapped_column(Text, nullable=True)  # pgvector VECTOR(768) stored as text for ORM
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(settings.embedding_dim), nullable=True)
     source_tier: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+
+
+class TaskQueue(Base):
+    """Postgres-backed task event bus (doc 12 envelope)."""
+
+    __tablename__ = "task_queue"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    task_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    source_agent: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    target_agent: Mapped[str] = mapped_column(String(50), nullable=False, default="")
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("acquisition_runs.id", ondelete="CASCADE"), nullable=True
+    )
+    claimed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_task_queue_claim", "status", "task_type", "created_at"),
+        Index("idx_task_queue_run", "run_id"),
+    )
+
+
+class Feedback(Base):
+    """User correction flywheel intake."""
+
+    __tablename__ = "feedback"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    entity_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("entities.id", ondelete="CASCADE"), nullable=False
+    )
+    correction_text: Mapped[str] = mapped_column(Text, nullable=False)
+    submitted_by_session: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="queued_for_review")
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index("idx_feedback_entity", "entity_id"),
+        Index("idx_feedback_status", "status"),
+    )

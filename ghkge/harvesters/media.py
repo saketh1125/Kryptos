@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 import structlog
 
 from ghkge.harvesters.base import BaseHarvester
-from ghkge.models.schemas import RawCaptureData
+from ghkge.models.schemas import ApprovedTarget, RawCaptureData
 
 logger = structlog.get_logger()
 
@@ -18,32 +18,32 @@ _media_executor = ThreadPoolExecutor(max_workers=1)
 class MediaHarvester(BaseHarvester):
     """Audio/Video harvester using yt-dlp + faster-whisper."""
 
-    async def fetch(self, url: str, run_id: uuid.UUID, **kwargs: object) -> RawCaptureData | None:
-        compliance_result = await self._check_compliance(
-            url, strategy="media_transcripts", entity_type=kwargs.get("entity_type", "")
-        )
+    async def fetch(self, target: ApprovedTarget, run_id: uuid.UUID) -> RawCaptureData | None:
+        compliance_result = await self._check_compliance(target)
         if not compliance_result.allowed:
-            logger.info("media_harvester.blocked", url=url, reason=compliance_result.reason)
+            logger.info(
+                "media_harvester.blocked", url=target.url, reason=compliance_result.reason
+            )
             return None
 
         try:
             content = await asyncio.get_event_loop().run_in_executor(
-                _media_executor, self._download_and_transcribe, url
+                _media_executor, self._download_and_transcribe, target.url
             )
             if content is None:
                 return None
 
             return RawCaptureData(
-                source_url=url,
+                source_url=target.url,
                 source_type="audio",
-                domain=self.extract_domain(url),
+                domain=self.extract_domain(target.url),
                 raw_content=content,
                 content_hash=self.compute_content_hash(content),
-                strategy_used="media_transcripts",
+                strategy_used=target.strategy,
                 run_id=run_id,
             )
         except Exception:
-            logger.error("media_harvester.fetch_error", url=url, exc_info=True)
+            logger.error("media_harvester.fetch_error", url=target.url, exc_info=True)
             return None
 
     def _download_and_transcribe(self, url: str) -> str | None:

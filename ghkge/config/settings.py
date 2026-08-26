@@ -38,6 +38,23 @@ class Settings(BaseSettings):
     entity_match_threshold: int = 85
     safety_corroboration_min: int = 2
 
+    # Domain configuration (YAML ontology + strategies)
+    domain_config_path: str = "config/default_domain.yaml"
+    grid_precision: int = 6  # geohash precision for grid cells (~1.2km x ~0.6km)
+
+    # Workers / task bus
+    workers_enabled: bool = True
+    worker_poll_interval_s: float = 1.0
+    worker_batch_size: int = 5
+    stale_task_takeover_minutes: int = 10
+
+    # Scheduler
+    scheduler_enabled: bool = True
+    gap_eval_interval_hours: int = 24
+    scheduled_acquisition_enabled: bool = False
+    acquisition_interval_hours: int = 24
+    scheduler_default_domain: str = ""
+
     # API
     api_host: str = "0.0.0.0"
     api_port: int = 8000

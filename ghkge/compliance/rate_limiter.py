@@ -10,7 +10,11 @@ logger = structlog.get_logger()
 
 
 class PostgresRateLimiter:
-    """Token-bucket rate limiter backed by Postgres to survive container restarts."""
+    """Minimum-interval gate backed by Postgres to survive container restarts.
+
+    Enforces at least ``limit_interval_s`` seconds between fetches per domain.
+    State lives in ``domain_rate_limit_state`` so restarts don't reset politeness.
+    """
 
     def __init__(self, db_pool: asyncpg.Pool) -> None:
         self.pool = db_pool

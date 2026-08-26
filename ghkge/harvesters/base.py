@@ -7,20 +7,25 @@ from abc import ABC, abstractmethod
 import structlog
 
 from ghkge.compliance.engine import ComplianceEngine
-from ghkge.models.schemas import ComplianceResult, RawCaptureData
+from ghkge.models.schemas import ApprovedTarget, ComplianceResult, RawCaptureData
 
 logger = structlog.get_logger()
 
 
 class BaseHarvester(ABC):
-    """Base class for all harvesters. All network access goes through ComplianceEngine."""
+    """Base class for all harvesters.
+
+    Guardrail (AGENTS.md #1): harvesters never accept raw URL strings.
+    All network access is keyed off a compliance-issued ApprovedTarget and
+    re-verified through ComplianceEngine immediately before any I/O.
+    """
 
     def __init__(self, compliance: ComplianceEngine) -> None:
         self.compliance = compliance
 
     @abstractmethod
-    async def fetch(self, url: str, run_id: uuid.UUID, **kwargs: object) -> RawCaptureData | None:
-        """Fetch and return raw content. Returns None if compliance blocks or fetch fails."""
+    async def fetch(self, target: ApprovedTarget, run_id: uuid.UUID) -> RawCaptureData | None:
+        """Fetch approved target content. Returns None if blocked or fetch fails."""
         ...
 
     @staticmethod
@@ -32,7 +37,7 @@ class BaseHarvester(ABC):
         from urllib.parse import urlparse
         return urlparse(url).netloc
 
-    async def _check_compliance(
-        self, url: str, strategy: str, entity_type: str
-    ) -> ComplianceResult:
-        return await self.compliance.check(url, strategy=strategy, entity_type=entity_type)
+    async def _check_compliance(self, target: ApprovedTarget) -> ComplianceResult:
+        return await self.compliance.check(
+            target.url, strategy=target.strategy, entity_type=target.entity_type
+        )

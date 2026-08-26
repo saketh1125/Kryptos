@@ -12,8 +12,14 @@ CREATE TABLE IF NOT EXISTS acquisition_runs (
     completed_at    TIMESTAMPTZ,
     status          VARCHAR(50) NOT NULL DEFAULT 'running',
     trigger         VARCHAR(50) NOT NULL DEFAULT 'scheduled',
-    last_canonical_id_processed UUID
+    last_canonical_id_processed UUID,
+    facts_extracted INT NOT NULL DEFAULT 0,
+    entities_written INT NOT NULL DEFAULT 0,
+    errors          JSONB NOT NULL DEFAULT '[]'
 );
+ALTER TABLE acquisition_runs ADD COLUMN IF NOT EXISTS facts_extracted INT NOT NULL DEFAULT 0;
+ALTER TABLE acquisition_runs ADD COLUMN IF NOT EXISTS entities_written INT NOT NULL DEFAULT 0;
+ALTER TABLE acquisition_runs ADD COLUMN IF NOT EXISTS errors JSONB NOT NULL DEFAULT '[]';
 CREATE INDEX IF NOT EXISTS idx_acquisition_runs_domain ON acquisition_runs(domain);
 
 -- 2. Raw Capture Store
@@ -43,8 +49,10 @@ CREATE TABLE IF NOT EXISTS entities (
     corroboration_count INT NOT NULL DEFAULT 1,
     last_verified   TIMESTAMPTZ NOT NULL DEFAULT now(),
     neo4j_node_id   VARCHAR(255),
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    status          VARCHAR(20) NOT NULL DEFAULT 'active'
 );
+ALTER TABLE entities ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'active';
 CREATE INDEX IF NOT EXISTS idx_entities_type_cell ON entities(entity_type, grid_cell);
 CREATE INDEX IF NOT EXISTS idx_entities_canonical_name ON entities(canonical_name);
 
@@ -89,8 +97,10 @@ CREATE TABLE IF NOT EXISTS gap_queue (
     kind            VARCHAR(50) NOT NULL,
     severity        FLOAT NOT NULL,
     status          VARCHAR(50) NOT NULL DEFAULT 'open',
+    domain          VARCHAR(255),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE gap_queue ADD COLUMN IF NOT EXISTS domain VARCHAR(255);
 CREATE INDEX IF NOT EXISTS idx_gap_queue_status_severity ON gap_queue(status, severity DESC);
 
 -- 7. Domain Rate Limiter State
@@ -112,3 +122,36 @@ CREATE TABLE IF NOT EXISTS narrative_chunks (
 );
 CREATE INDEX IF NOT EXISTS idx_narrative_embedding ON narrative_chunks
     USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+
+-- 9. Task Event Bus (multi-agent protocol, doc 12)
+CREATE TABLE IF NOT EXISTS task_queue (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    task_type       VARCHAR(50) NOT NULL,
+    status          VARCHAR(20) NOT NULL DEFAULT 'pending',
+    source_agent    VARCHAR(50) NOT NULL DEFAULT '',
+    target_agent    VARCHAR(50) NOT NULL DEFAULT '',
+    payload         JSONB NOT NULL DEFAULT '{}',
+    result          JSONB,
+    attempts        INT NOT NULL DEFAULT 0,
+    max_attempts    INT NOT NULL DEFAULT 3,
+    last_error      TEXT,
+    run_id          UUID REFERENCES acquisition_runs(id) ON DELETE CASCADE,
+    claimed_at      TIMESTAMPTZ,
+    completed_at    TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_task_queue_claim ON task_queue(status, task_type, created_at);
+CREATE INDEX IF NOT EXISTS idx_task_queue_run ON task_queue(run_id);
+
+-- 10. Feedback (user correction flywheel)
+CREATE TABLE IF NOT EXISTS feedback (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    entity_id           UUID NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    correction_text     TEXT NOT NULL,
+    submitted_by_session VARCHAR(255),
+    status              VARCHAR(50) NOT NULL DEFAULT 'queued_for_review',
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_entity ON feedback(entity_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_status ON feedback(status);

@@ -8,7 +8,7 @@ import structlog
 
 from ghkge.config.settings import settings
 from ghkge.harvesters.base import BaseHarvester
-from ghkge.models.schemas import RawCaptureData
+from ghkge.models.schemas import ApprovedTarget, RawCaptureData
 
 logger = structlog.get_logger()
 
@@ -18,32 +18,32 @@ _doc_executor = ThreadPoolExecutor(max_workers=settings.max_concurrent_doc_parse
 class DocumentHarvester(BaseHarvester):
     """Document harvester for PDF/DOCX using docling."""
 
-    async def fetch(self, url: str, run_id: uuid.UUID, **kwargs: object) -> RawCaptureData | None:
-        compliance_result = await self._check_compliance(
-            url, strategy="doc_parse", entity_type=kwargs.get("entity_type", "")
-        )
+    async def fetch(self, target: ApprovedTarget, run_id: uuid.UUID) -> RawCaptureData | None:
+        compliance_result = await self._check_compliance(target)
         if not compliance_result.allowed:
-            logger.info("doc_harvester.blocked", url=url, reason=compliance_result.reason)
+            logger.info(
+                "doc_harvester.blocked", url=target.url, reason=compliance_result.reason
+            )
             return None
 
         try:
             content = await asyncio.get_event_loop().run_in_executor(
-                _doc_executor, self._parse_document, url
+                _doc_executor, self._parse_document, target.url
             )
             if content is None:
                 return None
 
             return RawCaptureData(
-                source_url=url,
+                source_url=target.url,
                 source_type="pdf",
-                domain=self.extract_domain(url),
+                domain=self.extract_domain(target.url),
                 raw_content=content,
                 content_hash=self.compute_content_hash(content),
-                strategy_used="doc_parse",
+                strategy_used=target.strategy,
                 run_id=run_id,
             )
         except Exception:
-            logger.error("doc_harvester.fetch_error", url=url, exc_info=True)
+            logger.error("doc_harvester.fetch_error", url=target.url, exc_info=True)
             return None
 
     def _parse_document(self, url: str) -> str | None:
