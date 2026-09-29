@@ -832,3 +832,118 @@ class TestGapLifecycle:
 
         assert await sweep_stranded_gaps(older_than_minutes=30) == 0
         assert await self._status(db, gap_id) == "in_progress"
+
+
+class TestNeighbourEdges:
+    """Edges must actually be written, or /nearby is permanently a fallback."""
+
+    async def test_consolidation_links_cell_neighbours(self, db, fakes, monkeypatch):
+        linked: list[tuple[str, list[str]]] = []
+
+        async def fake_link(entity, sibling_ids):
+            linked.append((str(entity.id), [str(s) for s in sibling_ids]))
+            return len(sibling_ids)
+
+        import ghkge.consolidation.sync as sync_mod
+
+        monkeypatch.setattr(sync_mod, "link_grid_cell_neighbours", fake_link)
+        # The consolidator imported the symbol directly, so patch there too.
+        monkeypatch.setattr(workers, "link_grid_cell_neighbours", fake_link)
+
+        names = iter(["Ghat A", "Ghat B", "Ghat C"])
+
+        async def distinct_entities(text: str, source_url: str = "") -> list[ExtractedFactSchema]:
+            return [
+                ExtractedFactSchema(
+                    entity_name=next(names),
+                    entity_category="LOCATION",
+                    is_macro_knowledge=False,
+                    is_safety_relevant=False,
+                    contextual_insight="A ghat in Varanasi.",
+                    confidence_score=0.8,
+                )
+            ]
+
+        monkeypatch.setattr(workers, "extract_facts_from_text", distinct_entities)
+
+        run = await submit_run(DOMAIN, trigger="manual")
+        first = await _add_capture(db, run, "varanasi.nic.in", "Ghat A", "edge1")
+        second = await _add_capture(db, run, "varanasi.nic.in", "Ghat B", "edge2")
+        third = await _add_capture(db, run, "varanasi.nic.in", "Ghat C", "edge3")
+
+        for capture_id in (first, second, third):
+            await _enqueue_extract(db, run, capture_id)
+            await _drain(bus.TASK_EXTRACT)
+            await _drain(bus.TASK_CONSOLIDATE)
+
+        async with db() as session:
+            entities = (await session.execute(select(Entity))).scalars().all()
+        assert len(entities) == 3
+        assert linked, "consolidation must attempt NEAR edge writes"
+        # The third entity should see both earlier siblings in its cell.
+        assert any(len(siblings) >= 2 for _, siblings in linked)
+
+    async def test_link_ignores_self(self):
+        """A NEAR edge from an entity to itself is meaningless."""
+        import uuid as _uuid
+
+        from ghkge.consolidation.sync import link_grid_cell_neighbours
+
+        class FakeEntity:
+            id = _uuid.uuid4()
+            grid_cell = "u4pruyk"
+            canonical_name = "Darbhanga Ghat"
+
+        entity = FakeEntity()
+        calls: list[list[str]] = []
+
+        class FakeSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def run(self, query, **params):
+                calls.append(params["siblings"])
+                raise RuntimeError("no graph in tests")
+
+        class FakeDriver:
+            def session(self):
+                return FakeSession()
+
+        import ghkge.consolidation.sync as sync_mod
+
+        original = sync_mod._get_neo4j_driver
+        sync_mod._get_neo4j_driver = lambda: FakeDriver()
+        try:
+            written = await link_grid_cell_neighbours(
+                entity, [entity.id, _uuid.uuid4()]
+            )
+        finally:
+            sync_mod._get_neo4j_driver = original
+
+        # Driver failure is swallowed: edges are derived data.
+        assert written == 0
+        assert calls and str(entity.id) not in calls[0]
+
+    async def test_no_siblings_is_a_noop(self):
+        import uuid as _uuid
+
+        from ghkge.consolidation.sync import link_grid_cell_neighbours
+
+        class FakeEntity:
+            id = _uuid.uuid4()
+
+        class Boom:
+            def session(self):
+                raise AssertionError("must not touch Neo4j with no siblings")
+
+        import ghkge.consolidation.sync as sync_mod
+
+        original = sync_mod._get_neo4j_driver
+        sync_mod._get_neo4j_driver = lambda: Boom()
+        try:
+            assert await link_grid_cell_neighbours(FakeEntity(), []) == 0
+        finally:
+            sync_mod._get_neo4j_driver = original

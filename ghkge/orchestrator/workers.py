@@ -27,7 +27,11 @@ from ghkge.consolidation.resolver import (
     resolve_conflict,
     upsert_entity,
 )
-from ghkge.consolidation.sync import Neo4jUnavailableError, write_fact_to_stores
+from ghkge.consolidation.sync import (
+    Neo4jUnavailableError,
+    link_grid_cell_neighbours,
+    write_fact_to_stores,
+)
 from ghkge.database.connection import session_factory
 from ghkge.database.models import (
     AcquisitionRun,
@@ -473,6 +477,14 @@ async def _consolidate_fact(
         await session.rollback()
         logger.error("worker.neo4j_write_failed_rolling_back", fact_id=str(fact.id))
         raise
+
+    # Derive NEAR edges to the other entities in this cell. Best-effort: the
+    # node write above already succeeded, and /nearby still answers without
+    # edges, so a failure here must not roll the fact back.
+    siblings = (
+        await session.execute(select(Entity.id).where(Entity.grid_cell == grid_cell))
+    ).scalars().all()
+    await link_grid_cell_neighbours(entity, list(siblings))
 
     return (
         ConsolidationOutcome.MERGED if existing is not None else ConsolidationOutcome.CREATED

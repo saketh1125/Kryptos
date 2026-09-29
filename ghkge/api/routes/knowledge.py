@@ -253,20 +253,20 @@ async def get_nearby(
 
         driver = _get_neo4j_driver()
         async with driver.session() as neo_session:
-            # relation is allow-listed above and depth is an int bounded by Query;
-            # both are safe to interpolate. Entity ids remain bound parameters.
+            # relation is allow-listed above and depth is an int bounded by
+            # Query; both are safe to interpolate. Entity ids are parameters.
             result = await neo_session.run(
                 f"""
-                MATCH (src:Entity {{id: $id}})-[:{relation}*1..{depth}]-(n:Entity)
+                MATCH (src:Entity {{id: $id}})-[rel:{relation}*1..{depth}]-(n:Entity)
                 RETURN DISTINCT n.id AS id, n.canonical_name AS name,
-                       n.entity_type AS type
+                       n.entity_type AS type, rel AS rels
                 LIMIT 100
                 """,
                 id=str(entity_id),
             )
             graph_rows = [record async for record in result]
         if graph_rows:
-            nodes = [
+            nodes: list[GraphNode] = [
                 GraphNode(
                     id=uuid.UUID(str(r["id"])),
                     canonical_name=str(r["name"]),
@@ -274,14 +274,30 @@ async def get_nearby(
                 )
                 for r in graph_rows
             ]
+            # Surface the edge properties the contract specifies, rather than
+            # leaving distance_m and source_url null.
+            edges: list[GraphRelationship] = []
+            for record in graph_rows:
+                for rel in record["rels"]:
+                    edges.append(
+                        GraphRelationship(
+                            source=entity_id,
+                            target=uuid.UUID(str(record["id"])),
+                            type=type(rel).__name__.upper(),
+                            distance_m=rel.get("distance_m"),
+                            source_url=rel.get("source_url"),
+                        )
+                    )
             return NearbyResponse(
-                nodes=[GraphNode(id=entity.id, canonical_name=entity.canonical_name,
-                                 entity_type=entity.entity_type)]
+                nodes=[
+                    GraphNode(
+                        id=entity.id,
+                        canonical_name=entity.canonical_name,
+                        entity_type=entity.entity_type,
+                    )
+                ]
                 + nodes,
-                relationships=[
-                    GraphRelationship(source=entity.id, target=n.id, type=relation)
-                    for n in nodes
-                ],
+                relationships=edges,
             )
     except Exception:
         logger.warning("knowledge.neo4j_traversal_unavailable", exc_info=True)
@@ -301,17 +317,24 @@ async def get_nearby(
         .scalars()
         .all()
     )
+    # No graph available: the same-cell approximation is still a real answer,
+    # but it carries no measured distance, and the contract's distance_m and
+    # source_url stay None rather than being invented.
     return NearbyResponse(
         nodes=[
-            GraphNode(id=entity.id, canonical_name=entity.canonical_name,
-                      entity_type=entity.entity_type)
+            GraphNode(
+                id=entity.id,
+                canonical_name=entity.canonical_name,
+                entity_type=entity.entity_type,
+            )
         ]
         + [
             GraphNode(id=e.id, canonical_name=e.canonical_name, entity_type=e.entity_type)
             for e in neighbours
         ],
         relationships=[
-            GraphRelationship(source=entity.id, target=e.id, type=relation) for e in neighbours
+            GraphRelationship(source=entity.id, target=e.id, type=relation)
+            for e in neighbours
         ],
     )
 

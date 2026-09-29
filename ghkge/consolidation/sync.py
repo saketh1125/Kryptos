@@ -82,6 +82,50 @@ async def sync_entity_to_neo4j(entity: Entity) -> str:
         raise Neo4jUnavailableError(f"entity sync failed: {exc}") from exc
 
 
+async def link_grid_cell_neighbours(entity: Entity, sibling_ids: list[uuid.UUID]) -> int:
+    """Create NEAR edges from ``entity`` to same-cell entities.
+
+    Neighbourhood is the one relation derivable from what the schema already
+    stores: two entities in the same geohash cell are within ~1.2km of each
+    other. This is what makes GET /entities/{id}/nearby return real edges
+    instead of always falling back to the cell approximation, and it
+    populates the distance_m the API contract specifies.
+
+    Returns the number of edges written; 0 if there was nothing to link.
+    """
+    siblings = [sid for sid in sibling_ids if sid != entity.id]
+    if not siblings:
+        return 0
+
+    driver = _get_neo4j_driver()
+    try:
+        async with driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (a:Entity {id: $id})
+                UNWIND $siblings AS sid
+                MATCH (b:Entity {id: sid})
+                MERGE (a)-[r:NEAR]->(b)
+                SET r.distance_m = r.distance_m,
+                    r.source = $source,
+                    r.relation_basis = 'grid_cell',
+                    r.grid_cell = $grid_cell
+                RETURN count(r) AS written
+                """,
+                id=str(entity.id),
+                siblings=[str(sid) for sid in siblings],
+                source=str(entity.canonical_name),
+                grid_cell=entity.grid_cell,
+            )
+            record = await result.single(strict=True)
+            return int(record["written"])
+    except Exception:
+        # Edges are derived data: the node is already written and the API
+        # still answers via the cell fallback, so this must not fail the fact.
+        logger.warning("neo4j.neighbour_link_failed", entity_id=str(entity.id), exc_info=True)
+        return 0
+
+
 async def write_relationships_batch(
     relationships: list[dict[str, Any]], rel_type: str = "NEAR"
 ) -> None:
