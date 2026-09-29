@@ -226,6 +226,34 @@ async def evaluate_coverage(
     return gaps
 
 
+async def sweep_stranded_gaps(older_than_minutes: int = 30) -> int:
+    """Return long-running ``in_progress`` gaps to the queue.
+
+    The happy paths release their own gaps, but a worker that dies between
+    claiming a gap and finishing it leaves the gap in_progress with no task
+    to release it. The evaluator counts in_progress as seen, so such a gap
+    is never re-planned and coverage silently stops advancing (D-03).
+
+    Returns the number of gaps recovered.
+    """
+    cutoff = datetime.now(UTC) - timedelta(minutes=older_than_minutes)
+    async with session_factory()() as session:
+        result = await session.execute(
+            select(GapQueue).where(
+                GapQueue.status == "in_progress", GapQueue.created_at < cutoff
+            )
+        )
+        gaps = result.scalars().all()
+        for gap in gaps:
+            gap.status = "open"
+        if gaps:
+            await session.commit()
+        recovered = len(gaps)
+    if recovered:
+        logger.warning("gap_evaluator.stranded_gaps_recovered", count=recovered)
+    return recovered
+
+
 async def run_gap_evaluation(domain: str | None = None) -> int:
     """Entry point for the scheduler. Returns number of gaps created."""
     domain = domain or settings.scheduler_default_domain

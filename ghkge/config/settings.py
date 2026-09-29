@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     # Scheduler
     scheduler_enabled: bool = True
     gap_eval_interval_hours: int = 24
+    # An in_progress gap older than this is returned to the queue by the sweep.
+    gap_stale_after_minutes: int = 30
     scheduled_acquisition_enabled: bool = False
     acquisition_interval_hours: int = 24
     scheduler_default_domain: str = ""

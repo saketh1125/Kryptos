@@ -169,6 +169,9 @@ async def handle_plan_task(task_payload: dict[str, Any]) -> dict[str, Any]:
     async with session_factory()() as session:
         planned = await plan_gaps(session, config, domain, entity_types)
         enqueued = 0
+        # Gaps whose only strategy has nothing to fetch would otherwise sit in
+        # in_progress forever; they are returned to the queue here (D-03).
+        stranded: list[str] = []
         for task in planned:
             plan = plan_targets(
                 config, task["entity_type"], task["grid_cell"], task["strategy"]
@@ -179,12 +182,15 @@ async def handle_plan_task(task_payload: dict[str, Any]) -> dict[str, Any]:
                     strategy=task["strategy"],
                     entity_type=task["entity_type"],
                 )
+                stranded.append(task["gap_id"])
                 continue
             enqueued += await _enqueue_harvest(session, plan, task, run_id, domain)
+        for gap_id in stranded:
+            await _reopen_gap(gap_id)
         await session.commit()
 
     await _set_run_status(run_id, "running")
-    return {"planned": len(planned), "harvest_tasks": enqueued}
+    return {"planned": len(planned), "harvest_tasks": enqueued, "gaps_stranded": len(stranded)}
 
 
 # --- A2: Multi-Modal Harvester ---
@@ -217,10 +223,12 @@ async def handle_harvest_task(task_payload: dict[str, Any]) -> dict[str, Any]:
         approved = await compliance.approve(url, strategy=strategy, entity_type=entity_type)
         if approved is None:
             logger.info("worker.harvest_blocked", url=url, strategy=strategy)
+            await _reopen_gap(task_payload.get("gap_id"))
             return {"fetched": False, "reason": "compliance_blocked"}
         capture = await harvester.fetch(approved, run_id=run_id)
 
     if capture is None:
+        await _reopen_gap(task_payload.get("gap_id"))
         return {"fetched": False, "reason": "fetch_failed"}
 
     # Guardrail #2: raw capture persisted BEFORE any extraction.
@@ -233,6 +241,9 @@ async def handle_harvest_task(task_payload: dict[str, Any]) -> dict[str, Any]:
         )
         if existing.first() is not None:
             logger.info("worker.capture_duplicate", url=capture.source_url)
+            # Content already stored: extraction would be a no-op, so the gap
+            # has gained nothing and must go back in the queue (D-03).
+            await _reopen_gap(task_payload.get("gap_id"))
             return {"fetched": True, "duplicate": True, "raw_capture_id": None}
 
         row = RawCapture(
@@ -294,6 +305,7 @@ async def handle_extract_task(task_payload: dict[str, Any]) -> dict[str, Any]:
         capture = await session.get(RawCapture, capture_id)
         if capture is None or not capture.raw_content:
             logger.warning("worker.capture_missing", raw_capture_id=str(capture_id))
+            await _reopen_gap(task_payload.get("gap_id"))
             return {"facts": 0, "reason": "capture_missing"}
 
         tier = source_tier_for_domain(capture.domain)
@@ -339,6 +351,10 @@ async def handle_extract_task(task_payload: dict[str, Any]) -> dict[str, Any]:
                 run_id=run_id,
             )
         await session.commit()
+
+    if not written:
+        # Nothing hyperlocal in this capture: the gap is still unmet (D-03).
+        await _reopen_gap(task_payload.get("gap_id"))
 
     # The tier travels with the result so the yield log can weight it.
     return {"facts": written, "source_tier": tier}
@@ -460,6 +476,8 @@ async def handle_consolidate_task(task_payload: dict[str, Any]) -> dict[str, Any
             .all()
         )
         if not facts:
+            # Either already consolidated or reverted; the gap is not this
+            # task's to resolve, so leave it for the sweeper (D-03).
             return {"consolidated": 0, "reason": "no_pending_facts"}
 
         # Each fact commits independently: a mid-run failure keeps the facts
@@ -481,6 +499,28 @@ async def handle_consolidate_task(task_payload: dict[str, Any]) -> dict[str, Any
         "merged": counts[ConsolidationOutcome.MERGED],
         "held_for_review": counts[ConsolidationOutcome.HELD],
     }
+
+
+async def _reopen_gap(gap_id: str | None) -> None:
+    """Return a gap to the queue when its work did not produce knowledge.
+
+    Every non-consolidating exit path must call this. A gap that reaches
+    ``in_progress`` and is never resolved is invisible to the evaluator,
+    which counts in_progress as seen, so the pipeline silently stops
+    making progress (D-03).
+    """
+    if not gap_id:
+        return
+    try:
+        async with session_factory()() as session:
+            gap = await session.get(GapQueue, uuid.UUID(gap_id))
+            if gap is not None and gap.status == "in_progress":
+                gap.status = "open"
+                await session.commit()
+                logger.info("worker.gap_reopened", gap_id=gap_id)
+    except Exception:
+        # A stranded gap is recoverable via the sweeper; never fail the task.
+        logger.warning("worker.gap_reopen_failed", gap_id=gap_id, exc_info=True)
 
 
 async def _resolve_gap_if_served(gap_id: str | None) -> None:

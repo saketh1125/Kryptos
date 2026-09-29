@@ -468,6 +468,15 @@ async def _consolidate_one(db, run, capture_id, gap_id=None, cell="u4pruyk"):
     )
 
 
+def _extractor_none():
+    """An extractor that finds nothing hyperlocal."""
+
+    async def extract(text: str, source_url: str = "") -> list[ExtractedFactSchema]:
+        return []
+
+    return extract
+
+
 def _extractor(**fields):
     """Build an extract_facts_from_text stub returning one fixed fact."""
 
@@ -640,3 +649,186 @@ class TestYieldLogging:
             rows = (await session.execute(select(StrategyYieldLog))).scalars().all()
             assert rows
             assert all(r.avg_source_tier == 4 for r in rows)
+
+
+class TestGapLifecycle:
+    """D-03: a gap must never be stranded in in_progress."""
+
+    async def _claimed_gap(self, db, cell="u4pruyk"):
+        """A gap in the state the planner leaves it: claimed (in_progress)."""
+        async with db() as session:
+            gap = GapQueue(
+                grid_cell=cell,
+                entity_type="landmark",
+                kind="missing",
+                severity=3.0,
+                status="in_progress",
+                domain=DOMAIN,
+            )
+            session.add(gap)
+            await session.commit()
+            return gap.id
+
+    async def _status(self, db, gap_id) -> str:
+        async with db() as session:
+            return (await session.get(GapQueue, gap_id)).status
+
+    async def test_compliance_block_reopens_gap(self, db, monkeypatch):
+        """A blocked target must return its gap to the queue."""
+
+        async def refusing_compliance():
+            class _Engine:
+                async def approve(self, url, strategy, entity_type):
+                    return None
+
+            return _Engine()
+
+        monkeypatch.setattr(workers, "get_compliance", refusing_compliance)
+        run = await submit_run(DOMAIN, trigger="manual")
+        gap_id = await self._claimed_gap(db)
+
+        async with db() as session:
+            await bus.enqueue(
+                session,
+                bus.TASK_HARVEST,
+                bus.AGENT_HARVESTER,
+                {
+                    "url": "https://example.com/x",
+                    "engine": "web",
+                    "strategy": "web_crawls",
+                    "entity_type": "landmark",
+                    "grid_cell": "u4pruyk",
+                    "gap_id": str(gap_id),
+                    "run_id": str(run.id),
+                    "domain": DOMAIN,
+                },
+                run_id=run.id,
+            )
+            await session.commit()
+        for t in await bus.claim_tasks(bus.TASK_PLAN, limit=5):
+            await bus.complete_task(t.id, {"planned": 0, "harvest_tasks": 0})
+
+        await _drain(bus.TASK_HARVEST)
+        assert await self._status(db, gap_id) == "open"
+
+    async def test_fetch_failure_reopens_gap(self, db, fakes, monkeypatch):
+        class FailingHarvester:
+            async def fetch(self, target, run_id):
+                return None
+
+        async def failing_harvester(engine):
+            return FailingHarvester()
+
+        monkeypatch.setattr(workers, "get_harvester", failing_harvester)
+        run = await submit_run(DOMAIN, trigger="manual")
+        gap_id = await self._claimed_gap(db)
+
+        async with db() as session:
+            await bus.enqueue(
+                session,
+                bus.TASK_HARVEST,
+                bus.AGENT_HARVESTER,
+                {
+                    "url": "https://varanasi.nic.in/x",
+                    "engine": "web",
+                    "strategy": "official_portals",
+                    "entity_type": "landmark",
+                    "grid_cell": "u4pruyk",
+                    "gap_id": str(gap_id),
+                    "run_id": str(run.id),
+                    "domain": DOMAIN,
+                },
+                run_id=run.id,
+            )
+            await session.commit()
+        for t in await bus.claim_tasks(bus.TASK_PLAN, limit=5):
+            await bus.complete_task(t.id, {"planned": 0, "harvest_tasks": 0})
+
+        await _drain(bus.TASK_HARVEST)
+        assert await self._status(db, gap_id) == "open"
+
+    async def test_duplicate_capture_reopens_gap(self, db, fakes):
+        """Already-stored content gains nothing, so the gap stays unmet."""
+        run = await submit_run(DOMAIN, trigger="manual")
+        gap_id = await self._claimed_gap(db)
+        payload = {
+            "url": "https://varanasi.nic.in/tourist-place",
+            "engine": "web",
+            "strategy": "official_portals",
+            "entity_type": "landmark",
+            "grid_cell": "u4pruyk",
+            "gap_id": str(gap_id),
+            "run_id": str(run.id),
+            "domain": DOMAIN,
+        }
+        for _ in range(2):
+            async with db() as session:
+                await bus.enqueue(
+                    session, bus.TASK_HARVEST, bus.AGENT_HARVESTER, payload, run_id=run.id
+                )
+                await session.commit()
+        for t in await bus.claim_tasks(bus.TASK_PLAN, limit=5):
+            await bus.complete_task(t.id, {"planned": 0, "harvest_tasks": 0})
+
+        await _drain(bus.TASK_HARVEST)
+        # First fetch stored the capture; second was a duplicate. Neither
+        # consolidated, so the gap must be open.
+        assert await self._status(db, gap_id) == "open"
+
+    async def test_zero_facts_reopens_gap(self, db, fakes, monkeypatch):
+        """A capture with no hyperlocal facts leaves the gap unmet."""
+        monkeypatch.setattr(workers, "extract_facts_from_text", _extractor_none())
+        run = await submit_run(DOMAIN, trigger="manual")
+        gap_id = await self._claimed_gap(db)
+        capture_id = await _add_capture(db, run, "varanasi.nic.in", "Nothing here.", "empty1")
+        await _enqueue_extract(db, run, capture_id, gap_id=gap_id)
+        await _drain(bus.TASK_EXTRACT)
+        assert await self._status(db, gap_id) == "open"
+
+    async def test_successful_consolidation_resolves_gap(self, db, fakes):
+        """The positive case still holds: knowledge lands, gap closes."""
+        run = await submit_run(DOMAIN, trigger="manual")
+        gap_id = await self._claimed_gap(db)
+        capture_id = await _add_capture(db, run, "varanasi.nic.in", "Ghat facts.", "ok1")
+        await _enqueue_extract(db, run, capture_id, gap_id=gap_id)
+        await _drain(bus.TASK_EXTRACT)
+        await _drain(bus.TASK_CONSOLIDATE)
+        assert await self._status(db, gap_id) == "resolved"
+
+    async def test_sweeper_recovers_stranded_gap(self, db, fakes):
+        """A worker that died mid-task leaves a gap the sweeper must recover."""
+        from datetime import UTC, datetime, timedelta
+
+        from ghkge.gap_evaluator.evaluator import sweep_stranded_gaps
+
+        async with db() as session:
+            session.add(
+                GapQueue(
+                    grid_cell="u4pruyk",
+                    entity_type="landmark",
+                    kind="missing",
+                    severity=3.0,
+                    status="in_progress",
+                    domain=DOMAIN,
+                    created_at=datetime.now(UTC) - timedelta(hours=3),
+                )
+            )
+            await session.commit()
+
+        recovered = await sweep_stranded_gaps(older_than_minutes=30)
+        assert recovered == 1
+        async with db() as session:
+            gap = (await session.execute(select(GapQueue))).scalar_one()
+            assert gap.status == "open"
+
+    async def test_sweeper_leaves_recent_gaps_alone(self, db, fakes):
+        from ghkge.gap_evaluator.evaluator import sweep_stranded_gaps
+
+        gap_id = await self._claimed_gap(db)
+        async with db() as session:
+            gap = await session.get(GapQueue, gap_id)
+            gap.status = "in_progress"
+            await session.commit()
+
+        assert await sweep_stranded_gaps(older_than_minutes=30) == 0
+        assert await self._status(db, gap_id) == "in_progress"

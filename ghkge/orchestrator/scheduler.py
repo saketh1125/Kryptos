@@ -7,7 +7,7 @@ from typing import Any
 import structlog
 
 from ghkge.config.settings import settings
-from ghkge.gap_evaluator.evaluator import run_gap_evaluation
+from ghkge.gap_evaluator.evaluator import run_gap_evaluation, sweep_stranded_gaps
 from ghkge.orchestrator import bus, workers
 from ghkge.orchestrator.domain import load_domain_config
 from ghkge.orchestrator.pipeline import submit_run
@@ -35,6 +35,10 @@ def _domain_name() -> str:
 
 
 async def _scheduled_gap_evaluation() -> None:
+    # Recover stranded gaps first, so a crashed worker cannot permanently
+    # remove a cell from coverage (D-03).
+    with contextlib.suppress(Exception):
+        await sweep_stranded_gaps(settings.gap_stale_after_minutes)
     with contextlib.suppress(Exception):
         await run_gap_evaluation(_domain_name())
 
