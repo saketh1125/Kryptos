@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import uuid
 from enum import Enum
 
 import structlog
@@ -73,29 +72,28 @@ async def upsert_entity(
     grid_cell: str,
     source_tier: int,
     confidence: float,
-) -> uuid.UUID:
+) -> Entity:
     """
-    Find or create a canonical entity. Returns the entity ID.
-    If matched, appends name as alias if not already present.
+    Find or create a canonical entity and return it.
+
+    On a match, appends the incoming name as an alias (when new), upgrades the
+    tier if the incoming source is more trusted, and bumps corroboration.
     """
     existing = await find_matching_entity(session, entity_name, entity_type, grid_cell)
 
     if existing is not None:
-        # Append alias if new
         name_title = entity_name.strip().title()
         if name_title != existing.canonical_name and name_title not in (existing.aliases or []):
             existing.aliases = list(existing.aliases or []) + [name_title]
 
-        # Update tier if incoming is better
         if source_tier < existing.best_tier:
             existing.best_tier = source_tier
 
         existing.corroboration_count += 1
         await session.flush()
         logger.debug("entity_resolution.merged", entity_id=str(existing.id), name=entity_name)
-        return existing.id
+        return existing
 
-    # Create new entity
     new_entity = Entity(
         canonical_name=entity_name.strip().title(),
         entity_type=entity_type,
@@ -106,7 +104,7 @@ async def upsert_entity(
     session.add(new_entity)
     await session.flush()
     logger.debug("entity_resolution.created", entity_id=str(new_entity.id), name=entity_name)
-    return new_entity.id
+    return new_entity
 
 
 def resolve_conflict(

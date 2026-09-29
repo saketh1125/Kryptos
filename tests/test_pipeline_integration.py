@@ -414,3 +414,183 @@ class TestFullPipeline:
         assert await finalize_run_if_done(run.id) is False
         async with db() as session:
             assert (await session.get(AcquisitionRun, run.id)).status == "queued"
+
+
+async def _enqueue_extract(db, run, capture_id, gap_id=None, cell="u4pruyk"):
+    """Enqueue an extract task and retire the run's plan task."""
+    async with db() as session:
+        await bus.enqueue(
+            session,
+            bus.TASK_EXTRACT,
+            bus.AGENT_SYNTHESIS,
+            {
+                "raw_capture_id": str(capture_id),
+                "strategy": "web_crawls",
+                "entity_type": "landmark",
+                "grid_cell": cell,
+                "gap_id": str(gap_id) if gap_id else None,
+                "run_id": str(run.id),
+            },
+            run_id=run.id,
+        )
+        await session.commit()
+    for t in await bus.claim_tasks(bus.TASK_PLAN, limit=5):
+        await bus.complete_task(t.id, {"planned": 0, "harvest_tasks": 0})
+
+
+async def _add_capture(db, run, domain, content, content_hash):
+    async with db() as session:
+        capture = RawCapture(
+            source_url=f"https://{domain}/page",
+            source_type="html",
+            domain=domain,
+            raw_content=content,
+            content_hash=content_hash,
+            strategy_used="web_crawls",
+            run_id=run.id,
+        )
+        session.add(capture)
+        await session.commit()
+        return capture.id
+
+
+async def _consolidate_one(db, run, capture_id, gap_id=None, cell="u4pruyk"):
+    """Consolidate a capture's pending facts and return the task result."""
+    return await workers.WORKER_HANDLERS[bus.TASK_CONSOLIDATE](
+        {
+            "raw_capture_id": str(capture_id),
+            "strategy": "web_crawls",
+            "entity_type": "landmark",
+            "grid_cell": cell,
+            "gap_id": str(gap_id) if gap_id else None,
+            "run_id": str(run.id),
+        }
+    )
+
+
+def _extractor(**fields):
+    """Build an extract_facts_from_text stub returning one fixed fact."""
+
+    async def extract(text: str, source_url: str = "") -> list[ExtractedFactSchema]:
+        return [ExtractedFactSchema(**fields)]
+
+    return extract
+
+
+class TestConsolidationOutcomes:
+    async def test_second_sighting_merges_and_bumps_corroboration(self, db, fakes):
+        """The same entity from two captures must merge, not duplicate."""
+        run = await submit_run(DOMAIN, trigger="manual")
+        first_id = await _add_capture(
+            db, run, "en.wikipedia.org", "Darbhanga Ghat ...", "wiki1"
+        )
+        await _enqueue_extract(db, run, first_id)
+        await _drain(bus.TASK_EXTRACT)
+        first = await _consolidate_one(db, run, first_id)
+
+        second_id = await _add_capture(
+            db, run, "en.wikipedia.org", "Darbhanga Ghat again", "wiki2"
+        )
+        await _enqueue_extract(db, run, second_id)
+        await _drain(bus.TASK_EXTRACT)
+        second = await _consolidate_one(db, run, second_id)
+
+        async with db() as session:
+            entities = (await session.execute(select(Entity))).scalars().all()
+            assert len(entities) == 1, "same entity in same cell must not duplicate"
+            assert entities[0].corroboration_count == 2
+
+        assert first["created"] == 1
+        assert second["created"] == 0
+        assert second["merged"] == 1
+
+    async def test_held_fact_does_not_close_its_gap(self, db, fakes, monkeypatch):
+        """A gap stays open when every fact was held for review."""
+        monkeypatch.setattr(
+            workers,
+            "extract_facts_from_text",
+            _extractor(
+                entity_name="Restricted Ghat",
+                entity_category="RULE",
+                is_macro_knowledge=False,
+                is_safety_relevant=True,
+                contextual_insight="Entry forbidden after 8pm.",
+                confidence_score=0.7,
+            ),
+        )
+
+        run = await submit_run(DOMAIN, trigger="manual")
+        async with db() as session:
+            gap = GapQueue(
+                grid_cell="u4pruyk",
+                entity_type="landmark",
+                kind="missing",
+                severity=3.0,
+                status="in_progress",
+                domain=DOMAIN,
+            )
+            session.add(gap)
+            await session.commit()
+            gap_id = gap.id
+
+        capture_id = await _add_capture(
+            db, run, "randomblog.com", "Entry forbidden after 8pm.", "held1"
+        )
+        await _enqueue_extract(db, run, capture_id, gap_id=gap_id)
+        await _drain(bus.TASK_EXTRACT)
+        await _drain(bus.TASK_CONSOLIDATE)
+
+        async with db() as session:
+            gap = await session.get(GapQueue, gap_id)
+            fact = (await session.execute(select(ExtractedFact))).scalar_one()
+            assert fact.resolution_status == "held_for_review"
+            # Regression: the gap used to close even though nothing was written.
+            assert gap.status == "in_progress", "gap must stay open until knowledge lands"
+
+    async def test_consolidation_reports_held_count(self, db, fakes, monkeypatch):
+        monkeypatch.setattr(
+            workers,
+            "extract_facts_from_text",
+            _extractor(
+                entity_name="Zoned Ghat",
+                entity_category="RULE",
+                is_macro_knowledge=False,
+                is_safety_relevant=True,
+                contextual_insight="No entry.",
+                confidence_score=0.6,
+            ),
+        )
+        run = await submit_run(DOMAIN, trigger="manual")
+        capture_id = await _add_capture(db, run, "randomblog.com", "No entry.", "held2")
+        await _enqueue_extract(db, run, capture_id)
+        await _drain(bus.TASK_EXTRACT)
+
+        result = await _consolidate_one(db, run, capture_id)
+        assert result["consolidated"] == 0
+        assert result["held_for_review"] == 1
+
+    async def test_official_safety_fact_approved_immediately(self, db, fakes, monkeypatch):
+        monkeypatch.setattr(
+            workers,
+            "extract_facts_from_text",
+            _extractor(
+                entity_name="Official Ghat",
+                entity_category="RULE",
+                is_macro_knowledge=False,
+                is_safety_relevant=True,
+                contextual_insight="Dawn entry permitted.",
+                confidence_score=0.99,
+            ),
+        )
+        run = await submit_run(DOMAIN, trigger="manual")
+        capture_id = await _add_capture(
+            db, run, "varanasi.nic.in", "Dawn entry permitted.", "off1"
+        )
+        await _enqueue_extract(db, run, capture_id)
+        await _drain(bus.TASK_EXTRACT)
+        await _drain(bus.TASK_CONSOLIDATE)
+
+        async with db() as session:
+            fact = (await session.execute(select(ExtractedFact))).scalar_one()
+            assert fact.source_tier == 1
+            assert fact.resolution_status == "approved"

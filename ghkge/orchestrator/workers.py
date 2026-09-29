@@ -10,10 +10,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import uuid
+from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 
 import structlog
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ghkge.compliance.engine import ComplianceEngine
 from ghkge.compliance.rate_limiter import PostgresRateLimiter
@@ -107,8 +110,6 @@ async def close_workers() -> None:
 
 
 async def _set_run_status(run_id: uuid.UUID, status: str) -> None:
-    from datetime import UTC, datetime
-
     async with session_factory()() as session:
         run = await session.get(AcquisitionRun, run_id)
         if run is not None and run.status in ("queued", "running"):
@@ -344,14 +345,94 @@ async def handle_extract_task(task_payload: dict[str, Any]) -> dict[str, Any]:
 # --- A4: Graph Consolidator ---
 
 
-def _fact_status(entity: Entity, fact: ExtractedFact) -> str:
+def _needs_corroboration(fact: ExtractedFact, corroboration_count: int) -> bool:
     """Safety gate (doc 07 §4): safety facts need OFFICIAL tier or 2+ sources."""
-    needs_corroboration = (
-        fact.is_safety_relevant
-        and fact.source_tier != int(SourceTier.OFFICIAL)
-        and entity.corroboration_count < settings.safety_corroboration_min
+    return (
+        bool(fact.is_safety_relevant)
+        and int(fact.source_tier) != int(SourceTier.OFFICIAL)
+        and corroboration_count < settings.safety_corroboration_min
     )
-    return "held_for_review" if needs_corroboration else "approved"
+
+
+def _fact_status(entity: Entity, fact: ExtractedFact) -> str:
+    """Resolution status after consolidation, given the entity's corroboration."""
+    needs = _needs_corroboration(fact, int(entity.corroboration_count))
+    return "held_for_review" if needs else "approved"
+
+
+class ConsolidationOutcome(StrEnum):
+    """Result of consolidating a single fact."""
+
+    CREATED = "created"
+    MERGED = "merged"
+    HELD = "held_for_review"
+
+
+async def _consolidate_fact(
+    session: AsyncSession,
+    fact: ExtractedFact,
+    grid_cell: str,
+    raw_capture_id: uuid.UUID,
+) -> ConsolidationOutcome:
+    """Resolve one fact to an entity and persist it across the Trinity stores.
+
+    A safety-relevant fact from a non-official source is held until corroborated
+    (doc 07 §4). For a *new* entity that means nothing is written at all: the
+    entity would otherwise exist in the graph on the word of a single unverified
+    source. Merging into an entity that already has independent backing is fine,
+    so only the fact is held.
+
+    Raises Neo4jUnavailableError after rolling back, so the caller can requeue
+    without leaving a half-written fact behind.
+    """
+    entity_type = CATEGORY_TO_TYPE.get(fact.entity_category, "metadata")
+    existing = await find_matching_entity(session, fact.entity_name_raw, entity_type, grid_cell)
+
+    if existing is not None:
+        resolution = resolve_conflict(
+            existing_tier=int(existing.best_tier),
+            existing_confidence=1.0,
+            existing_corroboration=int(existing.corroboration_count),
+            incoming_tier=int(fact.source_tier),
+            incoming_confidence=float(fact.confidence_score),
+            is_safety_relevant=bool(fact.is_safety_relevant),
+        )
+        if resolution is Resolution.HOLD_FOR_REVIEW:
+            fact.resolution_status = "held_for_review"
+            return ConsolidationOutcome.HELD
+    elif _needs_corroboration(fact, corroboration_count=1):
+        fact.resolution_status = "held_for_review"
+        return ConsolidationOutcome.HELD
+
+    entity = await upsert_entity(
+        session,
+        fact.entity_name_raw,
+        entity_type,
+        grid_cell,
+        source_tier=int(fact.source_tier),
+        confidence=float(fact.confidence_score),
+    )
+    entity.last_verified = datetime.now(UTC)
+    fact.canonical_entity_id = entity.id
+    fact.resolution_status = _fact_status(entity, fact)
+
+    try:
+        await write_fact_to_stores(
+            session,
+            entity=entity,
+            fact=fact,
+            raw_capture_id=raw_capture_id,
+            chunk_text=fact.contextual_insight,
+            source_tier=int(fact.source_tier),
+        )
+    except Neo4jUnavailableError:
+        await session.rollback()
+        logger.error("worker.neo4j_write_failed_rolling_back", fact_id=str(fact.id))
+        raise
+
+    return (
+        ConsolidationOutcome.MERGED if existing is not None else ConsolidationOutcome.CREATED
+    )
 
 
 async def handle_consolidate_task(task_payload: dict[str, Any]) -> dict[str, Any]:
@@ -359,10 +440,12 @@ async def handle_consolidate_task(task_payload: dict[str, Any]) -> dict[str, Any
     capture_id = uuid.UUID(task_payload["raw_capture_id"])
     grid_cell = task_payload["grid_cell"]
 
-    async with session_factory()() as write_session:
+    # One session for the whole task: the fact rows are bound to it, so their
+    # status updates must commit on this same transaction.
+    async with session_factory()() as session:
         facts = (
             (
-                await write_session.execute(
+                await session.execute(
                     select(ExtractedFact)
                     .where(
                         ExtractedFact.raw_capture_id == capture_id,
@@ -377,76 +460,25 @@ async def handle_consolidate_task(task_payload: dict[str, Any]) -> dict[str, Any
         if not facts:
             return {"consolidated": 0, "reason": "no_pending_facts"}
 
-        # Single session throughout: the fact rows are bound to it, so their
-        # status updates must commit on this same transaction.
-        created = 0
-        merged = 0
+        # Each fact commits independently: a mid-run failure keeps the facts
+        # already written, and the requeued task picks up the rest.
+        counts = dict.fromkeys(ConsolidationOutcome, 0)
         for fact in facts:
-            entity_type = CATEGORY_TO_TYPE.get(
-                fact.entity_category, task_payload.get("entity_type") or "metadata"
-            )
-            existing = await find_matching_entity(
-                write_session, fact.entity_name_raw, entity_type, grid_cell
-            )
-            if existing is not None:
-                resolution = resolve_conflict(
-                    existing_tier=int(existing.best_tier),
-                    existing_confidence=1.0,
-                    existing_corroboration=int(existing.corroboration_count),
-                    incoming_tier=int(fact.source_tier),
-                    incoming_confidence=float(fact.confidence_score),
-                    is_safety_relevant=bool(fact.is_safety_relevant),
-                )
-                if resolution is Resolution.HOLD_FOR_REVIEW:
-                    fact.resolution_status = "held_for_review"
-                    await write_session.commit()
-                    continue
+            outcome = await _consolidate_fact(session, fact, grid_cell, capture_id)
+            await session.commit()
+            counts[outcome] += 1
 
-            entity_id = await upsert_entity(
-                write_session,
-                fact.entity_name_raw,
-                entity_type,
-                grid_cell,
-                source_tier=int(fact.source_tier),
-                confidence=float(fact.confidence_score),
-            )
-            if existing is not None:
-                merged += 1
-            else:
-                created += 1
+    consolidated = counts[ConsolidationOutcome.CREATED] + counts[ConsolidationOutcome.MERGED]
+    if consolidated:
+        # Only close the gap once the knowledge actually landed.
+        await _resolve_gap_if_served(task_payload.get("gap_id"))
 
-            entity = await write_session.get(Entity, entity_id)
-            assert entity is not None
-            entity.last_verified = _utcnow()
-            fact.canonical_entity_id = entity_id
-            fact.resolution_status = _fact_status(entity, fact)
-
-            try:
-                await write_fact_to_stores(
-                    write_session,
-                    entity=entity,
-                    fact=fact,
-                    raw_capture_id=capture_id,
-                    chunk_text=fact.contextual_insight,
-                    source_tier=int(fact.source_tier),
-                )
-            except Neo4jUnavailableError:
-                await write_session.rollback()
-                logger.error(
-                    "worker.neo4j_write_failed_rolling_back", raw_capture_id=str(capture_id)
-                )
-                raise
-            await write_session.commit()
-
-    summary = {"consolidated": created + merged, "created": created, "merged": merged}
-    await _resolve_gap_if_served(task_payload.get("gap_id"))
-    return summary
-
-
-def _utcnow() -> Any:
-    from datetime import UTC, datetime
-
-    return datetime.now(UTC)
+    return {
+        "consolidated": consolidated,
+        "created": counts[ConsolidationOutcome.CREATED],
+        "merged": counts[ConsolidationOutcome.MERGED],
+        "held_for_review": counts[ConsolidationOutcome.HELD],
+    }
 
 
 async def _resolve_gap_if_served(gap_id: str | None) -> None:
