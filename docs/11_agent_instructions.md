@@ -1,8 +1,14 @@
 # Coding Agent Implementation Instructions — GHKGE
-**Document Version:** 1.0  
-**Status:** Approved  
-**Target Audience:** Autonomous Coding Agents, Mid-Range/Frontier Code Generation Models, Solo Developers.
 
+| Field | Value |
+|---|---|
+| **Document ID** | KRY-ENG-001 |
+| **Revision** | 1.1 |
+| **Status** | Implemented |
+| **Supersedes** | KRY-ENG-001 r1.0 |
+| **Last updated** | 2026-09-29 |
+| **Target audience** | Autonomous coding agents, solo developers |
+|
 ---
 
 ## 1. System Coding Guidelines

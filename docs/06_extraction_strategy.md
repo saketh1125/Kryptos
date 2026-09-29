@@ -1,8 +1,14 @@
 # Extraction Strategy Document — GHKGE
-**Document Version:** 1.0  
-**Status:** Approved  
-**Target Audience:** Harvester Developers, NLP Engineers, LLM Engineers.
 
+| Field | Value |
+|---|---|
+| **Document ID** | KRY-EXT-001 |
+| **Revision** | 1.0 |
+| **Status** | Implemented (partial) |
+| **Supersedes** | — |
+| **Last updated** | 2026-09-29 |
+| **Target audience** | Harvester developers, NLP engineers, LLM engineers |
+|
 ---
 
 ## 1. Multi-Modal Ingestion Flow

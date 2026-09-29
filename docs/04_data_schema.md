@@ -1,8 +1,14 @@
 # Data Schema Document — GHKGE
-**Document Version:** 1.0  
-**Status:** Approved  
-**Target Audience:** Database Administrators, Backend Developers, Data Engineers.
 
+| Field | Value |
+|---|---|
+| **Document ID** | KRY-SCH-001 |
+| **Revision** | 1.1 |
+| **Status** | Implemented (partial) |
+| **Supersedes** | KRY-SCH-001 r1.0 |
+| **Last updated** | 2026-09-29 |
+| **Target audience** | Database administrators, backend developers, data engineers |
+|
 ---
 
 ## 1. Storage Topology
@@ -186,3 +192,41 @@ To guarantee database consistency without expensive distributed locking, writes 
 3.  Perform resolution checking; if entity resolves, execute Postgres `entities` updates.
 4.  Generate embedding for chunks and write to pgvector `narrative_chunks` table linked to Postgres `entity_id`.
 5.  Push Node and Edge parameters to Neo4j. In case of failure, roll back Postgres entity transaction and flag fact resolution as `failed` for cleanup.
+
+---
+
+## 6. Conformance Notes (r1.1)
+
+The tables specified in §1–§8 are implemented in `ghkge/database/models.py`, with
+three additions required by other documents in this set and one change to a
+column type:
+
+| Addition | Required by | Note |
+|---|---|---|
+| `task_queue` | KRY-MAP-001 §3 | The task event bus has no representation in this schema as written. Nine fields: `task_type`, `status`, `source_agent`, `target_agent`, `payload` (JSONB), `result`, `attempts`, `max_attempts`, `last_error`, plus `run_id` and claim timestamps. |
+| `feedback` | KRY-PRD-001 FR-9 | The `POST /v1/feedback` contract returns a `feedback_id`, but §1–§8 define no table to hold it. |
+| `entities.status` | KRY-RFP-001 §4 | Tombstoning is specified but has no column to archive into. Read-only so far — nothing writes `archived` (KRY-CONF-001 D-04 gap). |
+| `acquisition_runs.{facts_extracted, entities_written, errors}` | KRY-API-001 §2 | The run-status contract returns these three; §1 defines no columns for them. |
+| `strategy_yield_log.avg_source_tier` | KRY-RFP-001 §3 | The decay formula needs a mean source tier; `avg_confidence` is a 0–1 score and cannot substitute. |
+
+Two drift risks are worth recording:
+
+- **`sql/schema.sql:121` hardcodes `VECTOR(768)`** while the ORM reads
+  `settings.embedding_dim`. Changing `GHKGE_EMBEDDING_DIM` desynchronises the DDL
+  from the ORM silently, because nothing applies the DDL or validates the pair.
+- **No migration mechanism exists.** `sql/schema.sql` is the artifact of record
+  and must be applied by hand; it is not derived from the models, and the two
+  are not checked against each other by any test.
+
+Per KRY-ENG-001 §2, this document remains authoritative for DDL. The executable
+form is `sql/schema.sql`; where they disagree, that file wins in practice and
+this document should be corrected.
+
+---
+
+## 7. Revision History
+
+| Rev | Date | Change |
+|---|---|---|
+| 1.0 | — | Initial schema. |
+| 1.1 | 2026-09-29 | Added §6 conformance notes: five additions and the migration gap. Normative DDL unchanged. |

@@ -1,6 +1,15 @@
 # Generalized Hyperlocal Knowledge Graph Engine (GHKGE)
 **Detailed Technical Architecture v6.0 — Requirements, Components, Data Model & API Contracts**
 
+| Field | Value |
+|---|---|
+| **Document ID** | KRY-REF-001 |
+| **Revision** | 6.0 |
+| **Status** | Approved |
+| **Supersedes** | — |
+| **Last updated** | 2026-09-29 |
+| **Target audience** | All engineering roles |
+|
 ---
 
 ## 0. Document Purpose & Scope

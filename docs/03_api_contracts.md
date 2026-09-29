@@ -1,14 +1,31 @@
 # API Contracts Document — GHKGE
-**Document Version:** 1.0  
-**Status:** Approved  
-**Target Audience:** Frontend Engineers, Downstream App Developers, Integration Engineers.
 
+| Field | Value |
+|---|---|
+| **Document ID** | KRY-API-001 |
+| **Revision** | 1.1 |
+| **Status** | Implemented (partial) |
+| **Supersedes** | KRY-API-001 r1.0 |
+| **Last updated** | 2026-09-29 |
+| **Target audience** | Frontend engineers, downstream app developers, integration engineers |
+|
 ---
 
 ## 1. Gateway Overview
 All API services are built using FastAPI and expose standard JSON payloads. The system exposes two API boundaries:
 1.  **Orchestration API (Internal / Port 8000/admin):** Used to queue scraping runs, manage coverage gaps, and inspect strategy metrics.
 2.  **Knowledge API (Public / Port 8000/api):** Used by downstream consumer applications to traversal the knowledge graph, query facts, search, and submit corrections.
+
+> **Conformance note (r1.1).** Endpoint *paths* in §2–§3 below are written
+> without the version segment. The implementation composes the documented
+> boundary with the version segment: `/admin/v1/runs`, `/admin/v1/gaps`,
+> `/admin/v1/strategies/yield`, `/api/v1/entities/*`, `/api/v1/feedback`.
+> The boundary, method, request shape and status code in each table are as
+> specified; field-level deltas are itemised in
+> [KRY-CONF-001 §3](13_conformance_matrix.md). Two endpoints exist in the
+> implementation that this contract does not yet describe —
+> `GET /admin/v1/facts` and `POST /admin/v1/facts/{id}/moderate`, which back the
+> conflict-review queue in KRY-UI-001. They are unspecced pending r1.2.
 
 ---
 

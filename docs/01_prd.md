@@ -1,8 +1,14 @@
 # Product Requirements Document (PRD) — GHKGE
-**Document Version:** 1.0  
-**Status:** Approved  
-**Target Audience:** Hyperlocal guide builders, final-year project evaluators, downstream application developers.
 
+| Field | Value |
+|---|---|
+| **Document ID** | KRY-PRD-001 |
+| **Revision** | 1.0 |
+| **Status** | Approved |
+| **Supersedes** | — |
+| **Last updated** | 2026-09-29 |
+| **Target audience** | Hyperlocal guide builders, final-year project evaluators, downstream application developers |
+|
 ---
 
 ## 1. Product Overview & Objectives

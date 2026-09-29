@@ -1,8 +1,14 @@
 # Data Quality and Validation Spec — GHKGE
-**Document Version:** 1.0  
-**Status:** Approved  
-**Target Audience:** Data Quality Engineers, Database Developers, API Integrators.
 
+| Field | Value |
+|---|---|
+| **Document ID** | KRY-DQV-001 |
+| **Revision** | 1.0 |
+| **Status** | Implemented (partial) |
+| **Supersedes** | — |
+| **Last updated** | 2026-09-29 |
+| **Target audience** | Data quality engineers, database developers, API integrators |
+|
 ---
 
 ## 1. Data Quality Pillars

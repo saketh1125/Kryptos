@@ -1,8 +1,14 @@
 # Compliance and Legal Document — GHKGE
-**Document Version:** 1.0  
-**Status:** Approved  
-**Target Audience:** Compliance Officers, Legal Counsel, Developers.
 
+| Field | Value |
+|---|---|
+| **Document ID** | KRY-CMP-001 |
+| **Revision** | 1.0 |
+| **Status** | Approved |
+| **Supersedes** | — |
+| **Last updated** | 2026-09-29 |
+| **Target audience** | Compliance officers, legal counsel, developers |
+|
 ---
 
 ## 1. Legal Boundaries & Guarantees

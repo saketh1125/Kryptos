@@ -1,8 +1,14 @@
 # Multi-Agent Orchestration & Collaboration Protocol — GHKGE
-**Document Version:** 1.0  
-**Status:** Approved  
-**Target Audience:** Autonomous Agents, Multi-Agent Frameworks (LangGraph, CrewAI, Autogen, Custom subagents).
 
+| Field | Value |
+|---|---|
+| **Document ID** | KRY-MAP-001 |
+| **Revision** | 1.0 |
+| **Status** | Implemented |
+| **Supersedes** | — |
+| **Last updated** | 2026-09-29 |
+| **Target audience** | Backend engineers, SREs |
+|
 ---
 
 ## 1. Multi-Agent Topology

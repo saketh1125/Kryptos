@@ -1,8 +1,14 @@
 # System Architecture Document (SAD) — GHKGE
-**Document Version:** 1.0  
-**Status:** Approved  
-**Target Audience:** System Architects, Backend Engineers, Infrastructure Operators.
 
+| Field | Value |
+|---|---|
+| **Document ID** | KRY-ARC-001 |
+| **Revision** | 1.0 |
+| **Status** | Approved |
+| **Supersedes** | — |
+| **Last updated** | 2026-09-29 |
+| **Target audience** | System architects, backend engineers, infrastructure operators |
+|
 ---
 
 ## 1. System Topology Overview

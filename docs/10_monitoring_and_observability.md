@@ -1,8 +1,14 @@
 # Monitoring and Observability Spec — GHKGE
-**Document Version:** 1.0  
-**Status:** Approved  
-**Target Audience:** DevOps Engineers, Backend Engineers, System Administrators.
 
+| Field | Value |
+|---|---|
+| **Document ID** | KRY-OBS-001 |
+| **Revision** | 1.0 |
+| **Status** | Implemented (partial) |
+| **Supersedes** | — |
+| **Last updated** | 2026-09-29 |
+| **Target audience** | DevOps engineers, backend engineers, system administrators |
+|
 ---
 
 ## 1. Structured Logging Principles

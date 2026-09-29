@@ -1,5 +1,16 @@
 # GHKGE — Agent Instructions
 
+## Design Documents
+
+Read [docs/README.md](../docs/README.md) for the register. The two that
+constrain implementation most:
+
+- **[KRY-ENG-001](../docs/11_agent_instructions.md)** — these instructions.
+- **[KRY-CONF-001](../docs/13_conformance_matrix.md)** — requirement →
+  implementation → test evidence, plus the open defect list. Check it before
+  claiming anything works: three defects are release-blocking and the
+  verification basis is entirely mocked.
+
 ## Quick Commands
 ```bash
 python main.py                          # Run FastAPI server (port 8000)
@@ -86,7 +97,8 @@ are faked: compliance, the LLM, embeddings, Neo4j.
 
 ## DB Schema
 
-Run `sql/schema.sql` against Supabase Postgres to initialize all 10 tables
+No migration mechanism exists — `sql/schema.sql` must be applied by hand and
+can silently drift from the ORM (D-10). It initializes all 10 tables
 (`acquisition_runs`, `raw_captures`, `entities`, `extracted_facts`,
 `strategy_yield_log`, `gap_queue`, `domain_rate_limit_state`,
 `narrative_chunks`, `task_queue`, `feedback`) + the `vector` extension.

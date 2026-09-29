@@ -1,8 +1,14 @@
 # Refresh Policy Document — GHKGE
-**Document Version:** 1.0  
-**Status:** Approved  
-**Target Audience:** Infrastructure Operations, DBAs, Data Curators.
 
+| Field | Value |
+|---|---|
+| **Document ID** | KRY-RFP-001 |
+| **Revision** | 1.0 |
+| **Status** | Implemented (partial) |
+| **Supersedes** | — |
+| **Last updated** | 2026-09-29 |
+| **Target audience** | Infrastructure operations, DBAs, data curators |
+|
 ---
 
 ## 1. Refresh & Freshness Objectives

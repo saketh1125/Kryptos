@@ -1,8 +1,14 @@
 # UI Design Spec — GHKGE Admin Console
-**Document Version:** 1.0  
-**Status:** Approved  
-**Target Audience:** Frontend Developers, UI/UX Designers.
 
+| Field | Value |
+|---|---|
+| **Document ID** | KRY-UI-001 |
+| **Revision** | 1.0 |
+| **Status** | Not implemented |
+| **Supersedes** | — |
+| **Last updated** | 2026-09-29 |
+| **Target audience** | Frontend developers, UI/UX designers |
+|
 ---
 
 ## 1. Design System & Aesthetics
