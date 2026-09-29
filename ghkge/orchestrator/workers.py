@@ -43,7 +43,7 @@ from ghkge.harvesters.media import MediaHarvester
 from ghkge.harvesters.web import WebHarvester
 from ghkge.models.schemas import DomainConfig, ExtractedFactSchema, SourceTier
 from ghkge.orchestrator import bus
-from ghkge.orchestrator.domain import load_domain_config, plan_targets
+from ghkge.orchestrator.domain import HarvestPlan, load_domain_config, plan_targets
 from ghkge.orchestrator.planner import plan_gaps
 from ghkge.synthesis.refiner import extract_facts_from_text
 
@@ -122,6 +122,43 @@ async def _set_run_status(run_id: uuid.UUID, status: str) -> None:
 # --- A1: Strategy & Compliance (planner) ---
 
 
+async def _enqueue_harvest(
+    session: AsyncSession,
+    plan: HarvestPlan,
+    task: dict[str, str],
+    run_id: uuid.UUID,
+    domain: str,
+) -> int:
+    """Enqueue one harvest task per target in the plan. Returns task count."""
+    payloads = [
+        {"url": url, "overpass_query": None} for url in plan.urls
+    ] + [{"url": None, "overpass_query": plan.overpass_query}]
+    enqueued = 0
+    for item in payloads:
+        if not item["url"] and not item["overpass_query"]:
+            continue
+        await bus.enqueue(
+            session,
+            bus.TASK_HARVEST,
+            bus.AGENT_HARVESTER,
+            {
+                "url": item["url"],
+                "overpass_query": item["overpass_query"],
+                "engine": plan.engine,
+                "strategy": task["strategy"],
+                "entity_type": task["entity_type"],
+                "grid_cell": task["grid_cell"],
+                "gap_id": task["gap_id"],
+                "run_id": str(run_id),
+                "domain": domain,
+            },
+            source_agent=bus.AGENT_PLANNER,
+            run_id=run_id,
+        )
+        enqueued += 1
+    return enqueued
+
+
 async def handle_plan_task(task_payload: dict[str, Any]) -> dict[str, Any]:
     """Read open gaps, rank strategies, enqueue harvest instructions."""
     domain = task_payload["domain"]
@@ -133,53 +170,17 @@ async def handle_plan_task(task_payload: dict[str, Any]) -> dict[str, Any]:
         planned = await plan_gaps(session, config, domain, entity_types)
         enqueued = 0
         for task in planned:
-            target = plan_targets(config, task["entity_type"], task["grid_cell"], task["strategy"])
-            if not target:
+            plan = plan_targets(
+                config, task["entity_type"], task["grid_cell"], task["strategy"]
+            )
+            if plan is None or plan.is_empty:
                 logger.warning(
                     "planner.no_target",
                     strategy=task["strategy"],
                     entity_type=task["entity_type"],
                 )
                 continue
-            urls = target.get("urls") or ([target["url"]] if target.get("url") else [])
-            for url in urls:
-                await bus.enqueue(
-                    session,
-                    bus.TASK_HARVEST,
-                    bus.AGENT_HARVESTER,
-                    {
-                        "url": url,
-                        "engine": target["engine"],
-                        "strategy": task["strategy"],
-                        "entity_type": task["entity_type"],
-                        "grid_cell": task["grid_cell"],
-                        "gap_id": task["gap_id"],
-                        "run_id": str(run_id),
-                        "domain": domain,
-                    },
-                    source_agent=bus.AGENT_PLANNER,
-                    run_id=run_id,
-                )
-                enqueued += 1
-            if target.get("overpass_query"):
-                await bus.enqueue(
-                    session,
-                    bus.TASK_HARVEST,
-                    bus.AGENT_HARVESTER,
-                    {
-                        "overpass_query": target["overpass_query"],
-                        "engine": target["engine"],
-                        "strategy": task["strategy"],
-                        "entity_type": task["entity_type"],
-                        "grid_cell": task["grid_cell"],
-                        "gap_id": task["gap_id"],
-                        "run_id": str(run_id),
-                        "domain": domain,
-                    },
-                    source_agent=bus.AGENT_PLANNER,
-                    run_id=run_id,
-                )
-                enqueued += 1
+            enqueued += await _enqueue_harvest(session, plan, task, run_id, domain)
         await session.commit()
 
     await _set_run_status(run_id, "running")

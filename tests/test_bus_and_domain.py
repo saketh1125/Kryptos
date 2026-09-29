@@ -11,6 +11,7 @@ from ghkge.orchestrator import bus
 from ghkge.orchestrator.domain import (
     STRATEGY_ENGINES,
     DomainConfigNotFoundError,
+    HarvestPlan,
     build_overpass_query,
     cell_for_point,
     load_domain_config,
@@ -107,9 +108,11 @@ class TestPlanTargets:
             entity_types=[EntityTypeConfig(name="landmark", strategies=["osm_api"])],
         )
         cell = cell_for_point(25.305, 83.005)
-        target = plan_targets(config, "landmark", cell, "osm_api")
-        assert target["engine"] == "api_overpass"
-        assert "overpass_query" in target
+        plan = plan_targets(config, "landmark", cell, "osm_api")
+        assert plan is not None
+        assert plan.engine == "api_overpass"
+        assert plan.overpass_query is not None
+        assert plan.urls == ()
 
     def test_web_strategy_yields_seed_urls(self):
         config = DomainConfig(
@@ -119,24 +122,40 @@ class TestPlanTargets:
             strategy_seeds={"web_crawls": ["https://example.org/a", "https://example.org/b"]},
         )
         cell = cell_for_point(25.305, 83.005)
-        target = plan_targets(config, "landmark", cell, "web_crawls")
-        assert target["engine"] == "web"
-        assert target["urls"] == ["https://example.org/a", "https://example.org/b"]
+        plan = plan_targets(config, "landmark", cell, "web_crawls")
+        assert plan is not None
+        assert plan.engine == "web"
+        assert plan.urls == ("https://example.org/a", "https://example.org/b")
+        assert plan.overpass_query is None
 
-    def test_web_strategy_without_seeds_is_empty(self):
+    def test_web_strategy_without_seeds_is_none(self):
         config = DomainConfig(
             domain="t",
             geography_bbox=[25.3, 83.0, 25.31, 83.01],
             entity_types=[EntityTypeConfig(name="landmark", strategies=["web_crawls"])],
         )
-        result = plan_targets(config, "landmark", cell_for_point(25.3, 83.0), "web_crawls")
-        assert result.get("urls", []) == []
+        assert plan_targets(config, "landmark", cell_for_point(25.3, 83.0), "web_crawls") is None
 
-    def test_unknown_strategy_is_empty(self):
+    def test_unknown_strategy_is_none(self):
         config = DomainConfig(
             domain="t", geography_bbox=[25.3, 83.0, 25.31, 83.01], entity_types=[]
         )
-        assert plan_targets(config, "landmark", "u4pru", "nope") == {}
+        assert plan_targets(config, "landmark", "u4pru", "nope") is None
+
+    def test_osm_unsupported_entity_type_is_none(self):
+        config = DomainConfig(
+            domain="t", geography_bbox=[25.3, 83.0, 25.31, 83.01], entity_types=[]
+        )
+        # regulatory_rule has no OSM tag mapping.
+        assert (
+            plan_targets(config, "regulatory_rule", cell_for_point(25.3, 83.0), "osm_api")
+            is None
+        )
+
+    def test_empty_plan_reports_is_empty(self):
+        assert HarvestPlan(engine="web").is_empty is True
+        assert HarvestPlan(engine="web", urls=("https://x",)).is_empty is False
+        assert HarvestPlan(engine="api", overpass_query="q").is_empty is False
 
 
 class TestTaskConstruction:

@@ -10,7 +10,7 @@ import httpx
 import structlog
 
 from ghkge.config.settings import settings
-from ghkge.models.schemas import ComplianceResult
+from ghkge.models.schemas import ApprovedTarget, ComplianceResult
 
 logger = structlog.get_logger()
 
@@ -151,13 +151,11 @@ class ComplianceEngine:
         url: str,
         strategy: str,
         entity_type: str,
-    ) -> ComplianceResult | None:
-        """Check a URL and return an ApprovedTarget when allowed, else None."""
+    ) -> ApprovedTarget | None:
+        """Compliance-gate a URL and return an ApprovedTarget, or None if blocked."""
         result = await self.check(url, strategy=strategy, entity_type=entity_type)
         if not result.allowed:
             return None
-        from ghkge.models.schemas import ApprovedTarget
-
         return ApprovedTarget(
             url=url,
             domain=urlparse(url).netloc,

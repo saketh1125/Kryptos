@@ -6,6 +6,7 @@ the planner, and the harvester dispatch. A new city/domain is a YAML file.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import structlog
@@ -99,35 +100,46 @@ def build_overpass_query(entity_type: str, bbox_str: str) -> str | None:
     )
 
 
+@dataclass(frozen=True)
+class HarvestPlan:
+    """A concrete acquisition target derived from a gap + strategy."""
+
+    engine: str
+    urls: tuple[str, ...] = ()
+    overpass_query: str | None = None
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.urls and not self.overpass_query
+
+
 def plan_targets(
     config: DomainConfig,
     entity_type: str,
     grid_cell: str,
     strategy: str,
-) -> dict[str, object]:
-    """Produce the harvest instruction (engine + url/query) for one gap+strategy.
+) -> HarvestPlan | None:
+    """Produce the harvest instruction for one gap + strategy.
 
-    Returns {"engine": ..., "url": ...} or {"engine": ..., "overpass_query": ...},
-    or {} when no concrete target can be derived for this strategy.
+    Returns None when the strategy is unknown, has no OSM tag mapping, or has
+    no configured seed URLs (nothing to fetch).
     """
     engine = STRATEGY_ENGINES.get(strategy)
     if engine is None:
         logger.warning("domain.unknown_strategy", strategy=strategy)
-        return {}
+        return None
 
     if engine == "api_overpass":
         min_lat, min_lon, max_lat, max_lon = decode_bbox(grid_cell)
         query = build_overpass_query(entity_type, f"{min_lat},{min_lon},{max_lat},{max_lon}")
         if query is None:
-            return {}
-        return {"engine": engine, "overpass_query": query, "entity_type": entity_type}
+            return None
+        return HarvestPlan(engine=engine, overpass_query=query)
 
-    seeds = config.strategy_seeds.get(strategy) or []
-    return {
-        "engine": engine,
-        "urls": list(seeds),
-        "entity_type": entity_type,
-    }
+    seeds = tuple(config.strategy_seeds.get(strategy) or ())
+    if not seeds:
+        return None
+    return HarvestPlan(engine=engine, urls=seeds)
 
 
 def cell_for_point(lat: float, lng: float, precision: int | None = None) -> str:

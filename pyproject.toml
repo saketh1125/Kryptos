@@ -68,6 +68,19 @@ python_version = "3.11"
 strict = true
 plugins = ["pydantic.mypy"]
 
+# Third-party packages that ship no type information.
+[[tool.mypy.overrides]]
+module = [
+    "asyncpg.*",
+    "apscheduler.*",
+    "docling.*",
+    "faster_whisper.*",
+    "neo4j.*",
+    "yt_dlp.*",
+    "yaml.*",
+]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

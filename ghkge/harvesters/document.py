@@ -53,7 +53,8 @@ class DocumentHarvester(BaseHarvester):
 
             converter = DocumentConverter()
             result = converter.convert(url)
-            return result.document.export_to_markdown()
+            markdown: str = result.document.export_to_markdown()
+            return markdown
         except ImportError:
             logger.warning("doc_harvester.docling_not_installed")
             return None

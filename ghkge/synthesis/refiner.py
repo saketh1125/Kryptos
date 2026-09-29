@@ -42,9 +42,11 @@ async def extract_facts_from_chunk(
     client = _get_client()
 
     try:
-        facts = await client.chat.completions.create(
+        facts: list[ExtractedFactSchema] = await client.chat.completions.create(
             model=settings.extraction_model,
-            response_model=list[ExtractedFactSchema],
+            # instructor's async stubs declare response_model as the *awaited*
+            # type, but the runtime expects the response type itself.
+            response_model=list[ExtractedFactSchema],  # type: ignore[arg-type]
             messages=[
                 {
                     "role": "system",

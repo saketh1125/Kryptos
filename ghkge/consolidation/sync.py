@@ -82,7 +82,9 @@ async def sync_entity_to_neo4j(entity: Entity) -> str:
         raise Neo4jUnavailableError(f"entity sync failed: {exc}") from exc
 
 
-async def write_relationships_batch(relationships: list[dict], rel_type: str = "NEAR") -> None:
+async def write_relationships_batch(
+    relationships: list[dict[str, Any]], rel_type: str = "NEAR"
+) -> None:
     """Write relationships to Neo4j in batches of 50 using UNWIND."""
     if not relationships:
         return
@@ -123,8 +125,10 @@ async def generate_embedding(text: str) -> list[float] | None:
                 json={"model": settings.embedding_model, "prompt": text},
             )
             if resp.status_code == 200:
-                data = resp.json()
-                return data.get("embedding")
+                embedding = resp.json().get("embedding")
+                if isinstance(embedding, list):
+                    return [float(v) for v in embedding]
+                return None
         logger.warning("embedding.unavailable", status=resp.status_code)
         return None
     except Exception:
