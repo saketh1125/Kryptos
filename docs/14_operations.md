@@ -3,9 +3,9 @@
 | Field | Value |
 |---|---|
 | **Document ID** | KRY-OPS-001 |
-| **Revision** | 1.0 |
+| **Revision** | 1.1 |
 | **Status** | Implemented |
-| **Supersedes** | — |
+| **Supersedes** | KRY-OPS-001 r1.0 |
 | **Last updated** | 2026-09-29 |
 | **Owner** | Kryptos maintainers |
 | **Audience** | Operators, on-call engineers, whoever runs the first deploy |
@@ -13,10 +13,11 @@
 This is the procedure document. It covers what to do on a first deploy, what the
 system is doing at any moment, and what to do when it stops.
 
-> **Read §1 before deploying.** The system has never been run against live
-> services. [KRY-CONF-001](13_conformance_matrix.md) D-01 through D-03 are
-> release-blocking, and a first deploy should be expected to surface further
-> issues that no local test can reach.
+> **The release-blocking defects are closed** (D-01, D-02, D-03 — see
+> [KRY-CONF-001 §4](13_conformance_matrix.md)). The system has still never run
+> against live services: every external path is unverified, and a first deploy
+> should be expected to surface issues no local test can reach. This document
+> is what to do when that happens.
 
 ---
 
@@ -29,12 +30,16 @@ system is doing at any moment, and what to do when it stops.
 | Ollama (local or host) | embeddings, `nomic-embed-text`, 768-dim | self-hosted |
 | OpenRouter or an OpenAI-compatible endpoint | fact extraction | — |
 
-The PostgreSQL instance needs the `vector` and `uuid-ossp` extensions. They are
-created by `sql/schema.sql`, which must be applied manually.
+The schema is applied by Alembic. It creates the `vector` and `uuid-ossp`
+extensions along with all 10 tables:
 
 ```bash
-psql "$GHKGE_DATABASE_URL" -f sql/schema.sql
+alembic upgrade head
 ```
+
+`sql/schema.sql` remains as a readable DDL reference and still applies
+cleanly, but the migration is the artifact of record — it is what supports
+`upgrade`, and `--autogenerate` produces subsequent changes from it.
 
 **On Supabase**, append `?sslmode=require` to the DSN — remote instances refuse
 unencrypted connections, and this is not in the default value:
@@ -43,10 +48,10 @@ unencrypted connections, and this is not in the default value:
 GHKGE_DATABASE_URL=postgresql+asyncpg://user:pass@db.xxx.supabase.co:5432/postgres?sslmode=require
 ```
 
-⚠ **Check the pool budget before first deploy.** The app opens a SQLAlchemy pool
-of 5 + up to 10 overflow *and* a separate asyncpg pool of 2–5 — up to 20
-connections. Supabase free tier allows 15 (D-09). Reduce `pool_size` /
-`max_overflow` in `database/connection.py` if the provider is free-tier.
+Pool sizing defaults to 5+5 for SQLAlchemy and 1–3 for the rate limiter's own
+asyncpg pool — 13 total, inside Supabase's 15-connection free tier. Adjust
+`GHKGE_DB_POOL_SIZE`, `GHKGE_DB_MAX_OVERFLOW` and
+`GHKGE_RATE_LIMITER_POOL_{MIN,MAX}` for other plans.
 
 ---
 
@@ -54,14 +59,18 @@ connections. Supabase free tier allows 15 (D-09). Reduce `pool_size` /
 
 ```bash
 pip install -e ".[all,dev]"
-cp .env.example .env      # fill in keys
-psql "$GHKGE_DATABASE_URL" -f sql/schema.sql
+cp .env.example .env      # fill in keys; set GHKGE_ADMIN_API_KEY
+alembic upgrade head
 python main.py
 ```
 
-On startup the app initialises the database, starts four worker loops
-(planner, harvester, synthesis, consolidator) and the APScheduler gap-evaluation
-job. `/health` should return `{"status":"ok"}` within a second.
+On startup the app initialises the database, probes for the schema, starts
+four worker loops (planner, harvester, synthesis, consolidator) and the
+APScheduler gap-evaluation job.
+
+`/health` returns `{"status", "ready", "problems"}`. **Gate on `ready`, not the
+status code** — a degraded app deliberately still returns 200 so it stays
+reachable for diagnosis. If `ready` is false, `problems` says why.
 
 ⚠ `main.py` runs uvicorn with `reload=True`, which is correct for development
 and wrong for a container. A deployment entrypoint should set `reload=False`.
@@ -93,14 +102,13 @@ SELECT count(*) FROM entities;
 SELECT * FROM strategy_yield_log ORDER BY logged_at DESC LIMIT 5;
 ```
 
-**Expect zero `raw_captures` rows.** That is D-02: the rate limiter
-double-acquires and denies every non-Overpass fetch. It is the single most
-likely first-deploy failure, and it is invisible to the test suite because every
-test mocks the compliance gate.
+**Expect `raw_captures` rows.** D-02, which previously made this step capture
+nothing, is closed and covered by a test that drives the real compliance stack.
 
-A run that reaches `completed` with `facts_extracted: 0` and no errors is the
-silent-stall signature of D-03: gaps stuck in `in_progress`, work never
-rescheduled.
+If a run reaches `completed` with `facts_extracted: 0` and no errors, suspect
+compliance: the captures may have been blocked. Check
+`compliance.robots_disallow` and `compliance.denylisted_domain` in the logs —
+both are silent by design, so a blocked domain looks exactly like an empty one.
 
 ---
 
@@ -161,6 +169,9 @@ All output is structlog. `GHKGE_JSON_LOGGING=true` for newline-delimited JSON.
 | `compliance.rate_limited` | 2 s interval not elapsed |
 | `worker.capture_duplicate` | content hash already stored; extraction skipped |
 | `worker.harvest_blocked` | compliance refused the URL |
+| `worker.gap_reopened` | a gap returned to the queue after producing nothing |
+| `app.startup_degraded` | startup problem; see `/health` `problems` |
+| `app.admin_api_unprotected` | `GHKGE_ADMIN_API_KEY` is unset — set it for any shared deployment |
 | `worker.task_error` | handler raised; task will retry |
 | `worker.neo4j_write_failed_rolling_back` | graph write failed; Postgres rolled back, task requeued |
 | `bus.task_failed` | terminal failure after `max_attempts` |
@@ -177,8 +188,9 @@ finalization and gap resolution are all wrapped in `contextlib.suppress`
 
 ### Gaps stuck in `in_progress`
 
-The signature of D-03. Nothing rescues a gap whose task completed without
-consolidating. To recover:
+Normally impossible: every non-consolidating exit re-opens its gap, and
+`gap_stale_after_minutes` sweeps anything stranded by a crash. To recover
+manually — for example after a database restore — :
 
 ```sql
 UPDATE gap_queue SET status = 'open'
@@ -256,14 +268,11 @@ Not yet built; listed so their absence is not mistaken for oversights.
 
 | Gap | Impact |
 |---|---|
-| No container image | The target host (HF Spaces) has no artifact |
-| No CI | ruff, mypy and pytest pass locally but nothing enforces it |
-| No migrations | `sql/schema.sql` must be applied by hand and can drift from the ORM |
-| No metrics or alerting | Health is inferred from logs and ad-hoc SQL |
+| No metrics or alerting | Health is inferred from logs, `/health`, and ad-hoc SQL |
 | No backoff | External calls retry on the task bus, not with exponential delay |
-| No auth on `/admin/v1/*` | State-changing endpoints are internet-reachable |
+| Shared secret, not identities | Adequate as a gate; the review queue has no moderator identity |
 | No retention jobs | Storage grows without bound |
-| Silent startup failures | A broken deploy looks healthy (D-08) |
+| D-05 audit trail | Blocked requests are logged, not persisted |
 
 ---
 
@@ -272,3 +281,4 @@ Not yet built; listed so their absence is not mistaken for oversights.
 | Rev | Date | Change |
 |---|---|---|
 | 1.0 | 2026-09-29 | Initial runbook, written before first live deploy. |
+| 1.1 | 2026-09-29 | Alembic replaces manual DDL; D-01/D-02/D-03 closed so the smoke test can now expect captures; `/health` readiness contract; pool sizing documented. |

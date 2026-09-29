@@ -7,13 +7,15 @@ constrain implementation most:
 
 - **[KRY-ENG-001](../docs/11_agent_instructions.md)** — these instructions.
 - **[KRY-CONF-001](../docs/13_conformance_matrix.md)** — requirement →
-  implementation → test evidence, plus the open defect list. Check it before
-  claiming anything works: three defects are release-blocking and the
-  verification basis is entirely mocked.
+  implementation → test evidence, plus the defect register. Check it before
+  claiming anything works. The release-blocking defects are closed, but the
+  verification basis is still almost entirely mocked: only the compliance
+  stack is driven for real.
 
 ## Quick Commands
 ```bash
 python main.py                          # Run FastAPI server (port 8000)
+alembic upgrade head                    # Apply/create the schema
 python -m pytest tests/ -v              # Run tests
 python -m ruff check ghkge/ tests/      # Lint
 python -m ruff check ghkge/ --fix       # Auto-fix lint
@@ -82,7 +84,23 @@ are faked: compliance, the LLM, embeddings, Neo4j.
 - `tests/test_pipeline_integration.py` — full plan→consolidate chain, retry,
   duplicate, safety-gate behaviour, run finalization.
 - `tests/test_api_routes.py` — both API surfaces, including that unapproved
-  facts never leak.
+  facts never leak, that `/nearby` rejects non-allow-listed relations, and
+  that search query count does not grow with result count.
+- `tests/test_compliance_integration.py` — the **real** compliance engine,
+  robots parser, rate limiter and WebHarvester, socket intercepted. The only
+  test that exercises the gate for real; it is what caught D-02.
+
+## Operational Invariants
+
+- **Every gap reaches a terminal state.** A task that completes without
+  producing knowledge must call `_reopen_gap`. Stranded gaps are invisible to
+  the evaluator and coverage stops advancing silently.
+- **The rate-limit slot is charged once per fetch**, at the harvester. Call
+  `compliance.approve()` (which charges) or pass a pre-built `ApprovedTarget`
+  (which does not); never both for one request.
+- **`/admin/v1` is gated** by `X-Admin-Key` when `GHKGE_ADMIN_API_KEY` is set.
+  New admin routes inherit the gate from the router.
+- **`/health` has three fields.** Gate on `ready`, not the 200 status.
 
 ## Lint & Type Notes
 
@@ -97,8 +115,8 @@ are faked: compliance, the LLM, embeddings, Neo4j.
 
 ## DB Schema
 
-No migration mechanism exists — `sql/schema.sql` must be applied by hand and
-can silently drift from the ORM (D-10). It initializes all 10 tables
+Schema history lives in `migrations/` (Alembic). `alembic upgrade head`
+applies it; `sql/schema.sql` is the readable DDL reference. It initializes all 10 tables
 (`acquisition_runs`, `raw_captures`, `entities`, `extracted_facts`,
 `strategy_yield_log`, `gap_queue`, `domain_rate_limit_state`,
 `narrative_chunks`, `task_queue`, `feedback`) + the `vector` extension.

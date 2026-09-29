@@ -10,7 +10,7 @@
 | **Design set** | 15 versioned documents, [document register](docs/README.md) |
 | **Conformance** | [KRY-CONF-001](docs/13_conformance_matrix.md) |
 | **Operations** | [KRY-OPS-001](docs/14_operations.md) |
-| **Quality gates** | `ruff` clean · `mypy --strict` clean (40 modules) · 167 tests passing |
+| **Quality gates** | `ruff` clean · `mypy --strict` clean (41 modules) · 221 tests passing |
 
 A domain-agnostic, strategy-adaptive, multi-agent system that acquires,
 validates, and consolidates hyperlocal knowledge from the open web into a
@@ -28,12 +28,12 @@ truthful.
 > two disagree, the matrix is the honest answer — read it before trusting any
 > claim in this file.
 
-> ⚠ **Three release-blocking defects are open.** D-01 (Cypher injection on the
-> public API), D-02 (the rate limiter denies every non-Overpass fetch) and
-> D-03 (gaps leak into `in_progress`) are documented in
-> [KRY-CONF-001 §4](docs/13_conformance_matrix.md). Until they are fixed, the
-> system will not capture HTML/PDF/media data and should not be exposed
-> publicly.
+> ⚠ **The three release-blocking defects are closed** (D-01 Cypher injection,
+> D-02 rate-limiter double-charge, D-03 gap lifecycle leak) — see
+> [KRY-CONF-001 §4](docs/13_conformance_matrix.md). What is *not* closed is
+> verification: no test has ever contacted Postgres, Neo4j, Ollama or an LLM
+> provider. The logic is tested; the integration is not. Treat the first live
+> deploy as the real test, and follow [KRY-OPS-001](docs/14_operations.md).
 
 ---
 
@@ -274,18 +274,19 @@ Kryptos/
 
 ```bash
 pip install -e ".[all,dev]"
-cp .env.example .env                            # fill in keys
-psql "$GHKGE_DATABASE_URL" -f sql/schema.sql    # 10 tables + pgvector
-python main.py                                  # serves API on configured host:port
+cp .env.example .env          # fill in keys; set GHKGE_ADMIN_API_KEY
+alembic upgrade head          # 10 tables + pgvector
+python main.py                # serves API on configured host:port
 ```
 
-The schema must be applied by hand — there is no migration mechanism (D-10).
 On Supabase, append `?sslmode=require` to the DSN.
+
+`/health` returns `{"status", "ready", "problems"}` — **gate on `ready`**, not
+the status code: a degraded app still returns 200 so it stays diagnosable.
 
 **Verify with a real run, not `/health`.** Queue one run against a single
 entity type and confirm a `raw_captures` row appears; see the smoke test in
-[KRY-OPS-001 §2](docs/14_operations.md#2-first-deploy). Expect zero captures
-until D-02 is fixed.
+[KRY-OPS-001 §2](docs/14_operations.md#2-first-deploy).
 
 Quality gates:
 
@@ -307,78 +308,70 @@ the optional extras the engine still runs the web and API paths.
 
 ## 12. Status
 
-**Working v1, with three release-blocking defects open.** The pipeline is
-implemented end to end on the Postgres task bus: gap-driven planning,
-compliance-gated harvesting, LLM extraction, entity resolution with the safety
-gate, and rolled-back Trinity writes. Worker loops and the gap-evaluation
-scheduler start with the app.
+**Working v1, verified against mocks only.** The pipeline is implemented end to
+end on the Postgres task bus: gap-driven planning, compliance-gated harvesting,
+LLM extraction, entity resolution with the safety gate, rolled-back Trinity
+writes, and NEAR edges so `/nearby` answers from the graph. Workers and the
+gap-evaluation scheduler start with the app.
 
 **What is genuinely solid:** the task bus (claiming, retries, stale-task
 reclaim), the compliance engine (check ordering, fail-closed robots, blocked
-URLs never consuming a rate slot), the entity resolver, the safety gate, the
-KRY-RFP-001 §3 decay formula, the 10-table schema, and both API surfaces.
+URLs never consuming a rate slot, one charge per fetch), the entity resolver,
+the safety gate, the KRY-RFP-001 §3 decay formula, the 10-table schema with
+migrations, and both API surfaces.
 
 **What does not exist yet:** any interaction with a real service. Zero live
-fetches, zero LLM calls, zero embeddings, zero Neo4j writes, zero schema
-applications. The graph is nodes-only — no edges are written, so `/nearby` always
-falls back. Tombstoning, conflict resolution, metrics, backoff, auth,
-containerisation, CI and migrations are absent.
-
-### Open defects
-
-| ID | Severity | Summary |
-|---|---|---|
-| [D-01](docs/13_conformance_matrix.md#41-d-01--cypher-injection-on-an-unauthenticated-endpoint-critical) | **Critical** | `relation` param interpolated into Cypher on an unauthenticated endpoint |
-| [D-02](docs/13_conformance_matrix.md#42-d-02--rate-limiter-double-acquires-non-overpass-fetch-fails-critical) | **Critical** | Rate limiter double-acquires; every non-Overpass fetch is denied |
-| [D-03](docs/13_conformance_matrix.md#43-d-03--gap-lifecycle-leak-high) | High | Gaps leak into `in_progress` and never return to the queue |
-| [D-04](docs/13_conformance_matrix.md#44-d-04--search-n1-defeats-the-latency-nfr-high) | High | 500-query N+1 makes the <300 ms NFR unreachable |
-| [D-05](docs/13_conformance_matrix.md#45-d-05--auditability-gaps-medium) | Medium | Compliance decisions and graph nodes lack provenance |
-| [D-06](docs/13_conformance_matrix.md#46-d-06--source-tier-map-contradicts-kry-dqv-001-medium) | Medium | OSM tiered 2, not 1; this holds safety facts for review |
-| [D-07](docs/13_conformance_matrix.md#47-d-07--unauthenticated-admin-write-surface-medium) | Medium | `/admin/v1/*` writes unauthenticated; wildcard CORS |
-| [D-08](docs/13_conformance_matrix.md#48-d-08--silent-degradation-medium) | Medium | Startup and finalize failures suppressed; looks healthy |
-| [D-09](docs/13_conformance_matrix.md#49-d-09--connection-pool-likely-exceeds-free-tier-medium-unverifiable) | Medium | Up to 20 connections against a 15-connection free tier |
-| [D-10](docs/13_conformance_matrix.md#4-10--startup-failure-is-silent-on-a-fresh-database-medium) | Medium | Missing schema surfaces only as a repeating log line |
-| [D-11](docs/13_conformance_matrix.md#4-11--retry-delay-is-inverted-low) | Low | Retry timestamp arithmetic contradicts its own comment |
-| [D-12](docs/13_conformance_matrix.md#4-12--data-model-ceiling-design-not-a-bug) | Design | Geohash cell, no coordinates; ±600 m location error |
+fetches, zero LLM calls, zero embeddings, zero Neo4j writes. Tombstoning,
+conflict resolution, metrics, backoff, containerisation, CI and retention jobs
+are absent. The admin API is gated by a shared secret, not identities.
 
 ### Verification
 
-167 tests. All run against SQLite with the true externals — compliance gate,
-LLM, embeddings, Neo4j — replaced by fakes, because no live services are
-available. Logic, orchestration and invariants are verified; **every external
-I/O path, all Cypher, and pgvector behaviour are not.**
+221 tests. All run against SQLite with the true externals mocked — *except* the
+compliance stack, which is now driven for real in
+`test_compliance_integration.py` (real engine, real robots parser, real rate
+limiter, real harvester, socket intercepted). That test is what caught D-02, and
+it is confirmed to fail with the fix reverted.
 
-D-02 is the clearest illustration of the limit this creates: it is invisible to
-the suite, because every integration test mocks the compliance gate wholesale
-and so cannot observe a double acquisition.
+Still unverified: every external I/O path, all Cypher against a live graph,
+pgvector behaviour, `FOR UPDATE SKIP LOCKED` concurrency, and absolute latency.
+
+### Defect register
+
+Closed: **D-01** Cypher injection · **D-02** rate-limiter double-charge ·
+**D-03** gap lifecycle leak · **D-04** search N+1 · **D-06** source tiers ·
+**D-07** unauthenticated admin API · **D-08** silent startup (partially) ·
+**D-09** pool budget · **D-10** schema application.
+
+Open: **D-05** audit trail not persisted, graph nodes lack `raw_capture_id` ·
+**D-11** retry delay inverted (inert) · **D-12** geohash cell, no coordinates
+(by design; needs a migration). Full detail in
+[KRY-CONF-001 §4](docs/13_conformance_matrix.md).
 
 ### Known limitations
 
 - A safety fact from a single non-official source creates **no entity at all**;
   it is held for review and merged later if a second source corroborates it.
-  Combined with D-06, most safety knowledge starts life held, and with no
-  console and no auth there is no operator to release it.
+  With no admin console, releasing those is a manual API call.
 - Facts inherit the grid cell of the gap that produced them, so entities
   straddling a cell boundary cannot merge.
 - `EntityLocation` reports a geohash cell centre; `near` / `radius_m` measure
-  from it.
+  from it, so location error is roughly ±600 m.
+- NEAR edges are inferred from cell co-membership, not measured; they are
+  tagged `relation_basis: "grid_cell"` so consumers can tell.
 - Semantic search degrades to substring matching without Ollama; graph traversal
   falls back to same-cell neighbours without Neo4j.
 - Worker loops are strictly serial, so `Semaphore(3)` is decorative and
   effective fetch concurrency is 1. A municipal bootstrap is multi-day.
-- Postgres hand-offs are polled, not pushed: KRY-MAP-001 is implemented as a
-  polled queue.
+- Postgres hand-offs are polled, not pushed: KRY-MAP-001 is a polled queue.
 
-### Recommended next steps
+### Next steps
 
-1. D-01, D-02, D-03 — in that order; each unblocks the next.
-2. Self-applying schema (Alembic), `sslmode=require`, verify D-09 live.
-3. A real domain config: the shipped one is named `example_hyperlocal_domain`,
-   so `POST /admin/v1/runs {"domain":"kashi"}` matches zero gaps.
-4. One integration test wiring the **real** compliance engine and rate limiter
-   into a real `WebHarvester` — the test whose absence hid D-02.
-5. D-04, D-07, D-08, D-06, then Neo4j edge writes.
-6. Containerisation, CI, metrics, backoff, retention jobs.
+1. **A live smoke test** — the one thing that can confirm or refute the rest.
+2. D-05 — persist the compliance audit trail; add `raw_capture_id` to nodes.
+3. Conflict resolution (KRY-DQV-001 §3) — four outcomes specified, one consumed.
+4. Moderator identities, tombstoning, metrics, backoff, retention.
+5. Containerisation and CI.
 
 See [KRY-OPS-001](docs/14_operations.md) for deploy procedure, log reference
 and failure diagnosis.
