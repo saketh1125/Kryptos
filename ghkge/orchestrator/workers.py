@@ -340,7 +340,8 @@ async def handle_extract_task(task_payload: dict[str, Any]) -> dict[str, Any]:
             )
         await session.commit()
 
-    return {"facts": written}
+    # The tier travels with the result so the yield log can weight it.
+    return {"facts": written, "source_tier": tier}
 
 
 # --- A4: Graph Consolidator ---

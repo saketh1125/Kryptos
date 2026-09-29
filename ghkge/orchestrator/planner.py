@@ -1,65 +1,149 @@
 """Strategy Planner — Stage 1 rule-based, yield-aware.
 
-Reads the open gap queue, ranks strategies per entity type by historical
-yield (entities/call x novelty rate), and emits harvest instructions
-derived from the domain YAML (strategies, seeds) — never hardcoded here.
+Reads the open gap queue and ranks each entity type's YAML-declared
+strategies using the doc 08 §3 scoring formula:
+
+    score = historical_yield x tier_weight x recency_decay - normalized_cost
+
+Strategies are never hardcoded here: the vocabulary and the seed sources come
+from the domain YAML.
 """
 
 from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ghkge.database.models import GapQueue, StrategyYieldLog
-from ghkge.models.schemas import DomainConfig
+from ghkge.models.schemas import DomainConfig, SourceTier
 from ghkge.orchestrator.domain import STRATEGY_ENGINES
 
 logger = structlog.get_logger()
 
+# A strategy untouched for this long starts losing score.
+DECAY_GRACE_DAYS = 30.0
+# Relative LLM cost per harvested capture, by the tier of source it usually yields.
+# Officially-sourced portals are structured and cheap to synthesize; social and
+# general web crawls yield messier text that costs more per fact.
+TIER_WEIGHTS: dict[int, float] = {
+    int(SourceTier.OFFICIAL): 1.0,
+    int(SourceTier.CURATED): 0.9,
+    int(SourceTier.SOCIAL_VERIFIED): 0.7,
+    int(SourceTier.SOCIAL_GENERAL): 0.5,
+}
+NORMALIZED_COST: dict[str, float] = {
+    "osm_api": 0.0,
+    "api_query": 0.05,
+    "official_portals": 0.10,
+    "specialized_wikis": 0.15,
+    "business_directories": 0.20,
+    "news_feeds": 0.25,
+    "web_crawls": 0.30,
+    "social_media_crawls": 0.40,
+    "media_transcripts": 0.60,
+    "doc_parse": 0.50,
+}
+# Score assigned to a strategy with no history yet, so exploration still happens.
+EXPLORATION_SCORE = 1.0
 
-async def load_yield_stats(session: AsyncSession) -> dict[str, dict[str, float]]:
+
+@dataclass(frozen=True)
+class StrategyStats:
+    """Aggregated yield history for one strategy/entity-type pair."""
+
+    entities: float = 0.0
+    calls: float = 0.0
+    novel: float = 0.0
+    avg_tier: float = float(SourceTier.SOCIAL_GENERAL)
+    last_used: datetime | None = None
+
+    @property
+    def entities_per_call(self) -> float:
+        return self.entities / self.calls if self.calls > 0 else 0.0
+
+    @property
+    def novelty_rate(self) -> float:
+        return self.novel / self.entities if self.entities > 0 else 0.0
+
+
+def _tier_weight(tier: float) -> float:
+    """Weight of a source tier; unknown tiers score conservatively."""
+    nearest = min(TIER_WEIGHTS, key=lambda t: abs(t - tier))
+    return TIER_WEIGHTS[nearest]
+
+
+def recency_decay(last_used: datetime | None, now: datetime | None = None) -> float:
+    """e^(-lambda t) after a 30-day grace period; 1.0 while inside the grace."""
+    if last_used is None:
+        return 1.0
+    now = now or datetime.now(UTC)
+    age_days = (now - last_used).total_seconds() / 86400.0
+    if age_days <= DECAY_GRACE_DAYS:
+        return 1.0
+    return math.exp(-(age_days - DECAY_GRACE_DAYS) / DECAY_GRACE_DAYS)
+
+
+def strategy_score(
+    strategy: str, stats: StrategyStats | None, now: datetime | None = None
+) -> float:
+    """Doc 08 §3 score for one strategy. Higher is better."""
+    if stats is None or stats.calls <= 0:
+        return EXPLORATION_SCORE
+    score = (
+        stats.entities_per_call
+        * _tier_weight(stats.avg_tier)
+        * recency_decay(stats.last_used, now)
+    )
+    return score - NORMALIZED_COST.get(strategy, 0.25)
+
+
+async def load_strategy_stats(session: AsyncSession) -> dict[str, StrategyStats]:
     """Aggregate yield history keyed by 'strategy:entity_type'."""
-    stmt = select(StrategyYieldLog).order_by(StrategyYieldLog.logged_at.desc()).limit(500)
-    result = await session.execute(stmt)
-    logs = result.scalars().all()
+    stmt = select(StrategyYieldLog).order_by(StrategyYieldLog.logged_at.desc()).limit(1000)
+    logs = (await session.execute(stmt)).scalars().all()
 
-    stats: dict[str, dict[str, float]] = {}
+    totals: dict[str, dict[str, float]] = {}
+    newest: dict[str, datetime] = {}
     for row in logs:
         key = f"{row.strategy_name}:{row.entity_type}"
-        if key not in stats:
-            stats[key] = {"total_entities": 0.0, "total_calls": 0.0, "total_novel": 0.0}
-        stats[key]["total_entities"] += float(row.entities_found)
-        stats[key]["total_calls"] += float(row.calls_made)
-        stats[key]["total_novel"] += float(row.novel_entities)
-    return stats
+        entry = totals.setdefault(
+            key, {"entities": 0.0, "calls": 0.0, "novel": 0.0, "tier_sum": 0.0, "n": 0.0}
+        )
+        entry["entities"] += float(row.entities_found)
+        entry["calls"] += float(row.calls_made)
+        entry["novel"] += float(row.novel_entities)
+        entry["tier_sum"] += float(row.avg_source_tier)
+        entry["n"] += 1.0
+        if key not in newest or row.logged_at > newest[key]:
+            newest[key] = row.logged_at
 
-
-def score_strategy(
-    strategy: str, entity_type: str, yield_stats: dict[str, dict[str, float]]
-) -> float:
-    """Yield score for a strategy: entities-per-call x novelty-rate.
-
-    Untried strategies get a neutral 1.0 so exploration is not starved by
-    zero-yield proven strategies settling at the bottom.
-    """
-    stats = yield_stats.get(f"{strategy}:{entity_type}")
-    if not stats or stats["total_calls"] <= 0:
-        return 1.0
-    entities_per_call = stats["total_entities"] / stats["total_calls"]
-    novelty_rate = stats["total_novel"] / max(stats["total_entities"], 1.0)
-    return entities_per_call * novelty_rate
+    return {
+        key: StrategyStats(
+            entities=e["entities"],
+            calls=e["calls"],
+            novel=e["novel"],
+            avg_tier=e["tier_sum"] / e["n"] if e["n"] else float(SourceTier.SOCIAL_GENERAL),
+            last_used=newest.get(key),
+        )
+        for key, e in totals.items()
+    }
 
 
 def rank_strategies(
     strategies: list[str],
     entity_type: str,
-    yield_stats: dict[str, dict[str, float]],
+    stats: dict[str, StrategyStats],
+    now: datetime | None = None,
 ) -> list[str]:
-    """Order the YAML-declared strategies for one entity type by yield score."""
+    """Order an entity type's strategies by doc 08 §3 score, best first."""
     return sorted(
         strategies,
-        key=lambda s: score_strategy(s, entity_type, yield_stats),
+        key=lambda s: strategy_score(s, stats.get(f"{s}:{entity_type}"), now),
         reverse=True,
     )
 
@@ -87,7 +171,7 @@ async def plan_gaps(
         logger.info("planner.no_gaps", domain=domain)
         return []
 
-    yield_stats = await load_yield_stats(session)
+    stats = await load_strategy_stats(session)
     config_by_type = {et.name: et for et in config.entity_types or []}
 
     tasks: list[dict[str, str]] = []
@@ -98,20 +182,22 @@ async def plan_gaps(
         # "unknown" anomaly gaps probe broadly: use a landmark-based baseline.
         effective_type = "landmark" if gap.entity_type == "unknown" else gap.entity_type
         et_config = config_by_type.get(effective_type)
-        declared = [s for s in (et_config.strategies if et_config else []) if s in STRATEGY_ENGINES]
+        declared = [
+            s for s in (et_config.strategies if et_config else []) if s in STRATEGY_ENGINES
+        ]
         if not declared:
             declared = ["osm_api", "web_crawls"]
 
-        ranked = rank_strategies(declared, effective_type, yield_stats)
-        best_strategy = ranked[0]
+        best_strategy = rank_strategies(declared, effective_type, stats)[0]
 
-        task = {
-            "gap_id": str(gap.id),
-            "grid_cell": gap.grid_cell,
-            "entity_type": effective_type,
-            "strategy": best_strategy,
-        }
-        tasks.append(task)
+        tasks.append(
+            {
+                "gap_id": str(gap.id),
+                "grid_cell": gap.grid_cell,
+                "entity_type": effective_type,
+                "strategy": best_strategy,
+            }
+        )
         gap.status = "in_progress"
 
     await session.flush()

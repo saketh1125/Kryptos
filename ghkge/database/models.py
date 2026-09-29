@@ -144,6 +144,7 @@ class StrategyYieldLog(Base):
     entities_found: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     novel_entities: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     avg_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_source_tier: Mapped[int] = mapped_column(Integer, nullable=False, default=4)
     cost_estimate_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     logged_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
 

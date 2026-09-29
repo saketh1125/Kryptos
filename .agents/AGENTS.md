@@ -6,6 +6,7 @@ python main.py                          # Run FastAPI server (port 8000)
 python -m pytest tests/ -v              # Run tests
 python -m ruff check ghkge/ tests/      # Lint
 python -m ruff check ghkge/ --fix       # Auto-fix lint
+python -m mypy ghkge/                   # Type check (strict)
 ```
 
 ## Architecture
@@ -76,6 +77,9 @@ are faked: compliance, the LLM, embeddings, Neo4j.
 
 - Ruff ignores `B008` (FastAPI `Depends()`) and `E501` for
   `database/models.py` + `synthesis/refiner.py`.
+- mypy strict is clean. Third-party packages without type information are
+  listed under `[[tool.mypy.overrides]]`; the single inline ignore is
+  instructor's async `response_model` stub disagreeing with its runtime.
 - `asyncio_mode = "auto"` — async tests need no decorator.
 - All env vars prefixed `GHKGE_` via pydantic-settings.
 - `robots.txt` parsing uses stdlib `urllib.robotparser` (fail-closed).
@@ -98,4 +102,5 @@ Models in `ghkge/database/models.py`.
 | Browser concurrency | 3 | `settings.max_concurrent_browsers` |
 | Rate limit | 2s per domain | `settings.rate_limit_interval_s` |
 | Grid precision | 6 (geohash) | `settings.grid_precision` |
+| Strategy decay | 30-day grace, then e^(-t/30) | `planner.DECAY_GRACE_DAYS` |
 | Source tiers | OFFICIAL(1) > CURATED(2) > SOCIAL_VERIFIED(3) > SOCIAL_GENERAL(4) | `models/schemas.py` |

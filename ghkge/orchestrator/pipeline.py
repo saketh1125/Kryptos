@@ -73,11 +73,18 @@ async def _aggregate_yield(session: Any, run_id: uuid.UUID) -> None:
             continue
         key = (strategy, entity_type)
         entry = stats.setdefault(
-            key, {"calls": 0.0, "entities": 0.0, "novel": 0.0, "confidence": 0.0, "n": 0.0}
+            key,
+            {"calls": 0.0, "entities": 0.0, "novel": 0.0, "confidence_sum": 0.0,
+             "confidence_n": 0.0, "tier_sum": 0.0, "tier_n": 0.0},
         )
         result = task.result or {}
         if task.task_type == bus.TASK_HARVEST and result.get("fetched"):
             entry["calls"] += 1
+        elif task.task_type == bus.TASK_EXTRACT:
+            tier = result.get("source_tier")
+            if tier:
+                entry["tier_sum"] += float(tier)
+                entry["tier_n"] += 1
         elif task.task_type == bus.TASK_CONSOLIDATE:
             entry["entities"] += float(result.get("consolidated", 0) or 0)
             entry["novel"] += float(result.get("created", 0) or 0)
@@ -91,6 +98,9 @@ async def _aggregate_yield(session: Any, run_id: uuid.UUID) -> None:
                 calls_made=int(s["calls"]),
                 entities_found=int(s["entities"]),
                 novel_entities=int(s["novel"]),
+                avg_source_tier=int(
+                    round(s["tier_sum"] / s["tier_n"]) if s["tier_n"] else 4
+                ),
             )
         )
 

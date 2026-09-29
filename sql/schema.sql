@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS strategy_yield_log (
     entities_found  INT NOT NULL DEFAULT 0,
     novel_entities  INT NOT NULL DEFAULT 0,
     avg_confidence  FLOAT,
+    avg_source_tier SMALLINT NOT NULL DEFAULT 4,
     cost_estimate_usd FLOAT DEFAULT 0.0,
     logged_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -101,6 +102,7 @@ CREATE TABLE IF NOT EXISTS gap_queue (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE gap_queue ADD COLUMN IF NOT EXISTS domain VARCHAR(255);
+ALTER TABLE strategy_yield_log ADD COLUMN IF NOT EXISTS avg_source_tier SMALLINT NOT NULL DEFAULT 4;
 CREATE INDEX IF NOT EXISTS idx_gap_queue_status_severity ON gap_queue(status, severity DESC);
 
 -- 7. Domain Rate Limiter State

@@ -594,3 +594,49 @@ class TestConsolidationOutcomes:
             fact = (await session.execute(select(ExtractedFact))).scalar_one()
             assert fact.source_tier == 1
             assert fact.resolution_status == "approved"
+
+
+class TestYieldLogging:
+    async def test_source_tier_flows_into_yield_log(self, db, fakes):
+        """The extraction tier must reach strategy_yield_log so the planner can weight it."""
+        await _seed_gap(db)
+        run = await submit_run(DOMAIN, trigger="manual")
+        await _drain(bus.TASK_PLAN)
+        await _drain(bus.TASK_HARVEST)
+        await _drain(bus.TASK_EXTRACT)
+        await _drain(bus.TASK_CONSOLIDATE)
+
+        assert await finalize_run_if_done(run.id) is True
+        async with db() as session:
+            rows = (await session.execute(select(StrategyYieldLog))).scalars().all()
+            assert rows
+            # The fake harvester reports varanasi.nic.in, i.e. tier 1.
+            assert all(r.avg_source_tier == 1 for r in rows)
+            assert sum(r.entities_found for r in rows) >= 1
+            assert any(r.calls_made >= 1 for r in rows)
+
+    async def test_social_source_is_logged_as_lower_tier(self, db, fakes, monkeypatch):
+
+        monkeypatch.setattr(
+            workers,
+            "extract_facts_from_text",
+            _extractor(
+                entity_name="Blog Spot",
+                entity_category="LOCATION",
+                is_macro_knowledge=False,
+                is_safety_relevant=False,
+                contextual_insight="Open late.",
+                confidence_score=0.5,
+            ),
+        )
+        run = await submit_run(DOMAIN, trigger="manual")
+        capture_id = await _add_capture(db, run, "randomblog.com", "Open late.", "blog1")
+        await _enqueue_extract(db, run, capture_id)
+        await _drain(bus.TASK_EXTRACT)
+        await _drain(bus.TASK_CONSOLIDATE)
+
+        assert await finalize_run_if_done(run.id) is True
+        async with db() as session:
+            rows = (await session.execute(select(StrategyYieldLog))).scalars().all()
+            assert rows
+            assert all(r.avg_source_tier == 4 for r in rows)

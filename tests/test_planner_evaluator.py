@@ -1,6 +1,8 @@
-"""Tests for planner scoring, evaluator thresholds, and the safety gate."""
+"""Tests for planner scoring (doc 08 §3), evaluator thresholds, safety gate."""
 
 from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -10,63 +12,144 @@ from ghkge.gap_evaluator.evaluator import (
     staleness_cutoffs,
 )
 from ghkge.models.schemas import DomainConfig, EntityTypeConfig
-from ghkge.orchestrator.planner import rank_strategies, score_strategy
+from ghkge.orchestrator.planner import (
+    DECAY_GRACE_DAYS,
+    EXPLORATION_SCORE,
+    NORMALIZED_COST,
+    TIER_WEIGHTS,
+    StrategyStats,
+    rank_strategies,
+    recency_decay,
+    strategy_score,
+)
 from ghkge.orchestrator.workers import CATEGORY_TO_TYPE, _fact_status, source_tier_for_domain
 
+NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
-class TestScoreStrategy:
-    def test_untried_strategy_is_neutral(self):
-        assert score_strategy("web_crawls", "landmark", {}) == 1.0
 
-    def test_zero_call_history_is_neutral(self):
-        zero = {"total_entities": 0.0, "total_calls": 0.0, "total_novel": 0.0}
-        stats = {"web_crawls:landmark": zero}
-        assert score_strategy("web_crawls", "landmark", stats) == 1.0
+def stats(**kw) -> StrategyStats:
+    base = {
+        "entities": 100.0,
+        "calls": 10.0,
+        "novel": 50.0,
+        "avg_tier": 1.0,
+        "last_used": NOW,
+    }
+    return StrategyStats(**{**base, **kw})
 
-    def test_high_yield_high_novelity_scores_higher(self):
-        stats = {
-            "osm_api:landmark": {
-                "total_entities": 100.0, "total_calls": 10.0, "total_novel": 50.0
-            },
-            "web_crawls:landmark": {
-                "total_entities": 10.0, "total_calls": 10.0, "total_novel": 1.0
-            },
-        }
-        assert score_strategy("osm_api", "landmark", stats) > score_strategy(
-            "web_crawls", "landmark", stats
+
+class TestRecencyDecay:
+    def test_no_history_is_full_weight(self):
+        assert recency_decay(None, now=NOW) == 1.0
+
+    def test_inside_grace_period_is_full_weight(self):
+        recent = NOW - timedelta(days=10)
+        assert recency_decay(recent, now=NOW) == 1.0
+
+    def test_exactly_at_grace_boundary_is_full_weight(self):
+        edge = NOW - timedelta(days=DECAY_GRACE_DAYS)
+        assert recency_decay(edge, now=NOW) == pytest.approx(1.0)
+
+    def test_decays_after_grace(self):
+        stale = NOW - timedelta(days=60)
+        assert recency_decay(stale, now=NOW) < 1.0
+
+    def test_decay_is_monotonic(self):
+        values = [
+            recency_decay(NOW - timedelta(days=d), now=NOW) for d in (30, 45, 60, 90, 180)
+        ]
+        assert values == sorted(values, reverse=True)
+
+    def test_asymptotes_towards_zero(self):
+        ancient = NOW - timedelta(days=3000)
+        assert recency_decay(ancient, now=NOW) < 0.01
+
+    def test_never_negative(self):
+        ancient = NOW - timedelta(days=36500)
+        assert recency_decay(ancient, now=NOW) >= 0.0
+
+
+class TestStrategyScore:
+    def test_untried_strategy_gets_exploration_score(self):
+        assert strategy_score("web_crawls", None, now=NOW) == EXPLORATION_SCORE
+        assert strategy_score("web_crawls", StrategyStats(), now=NOW) == EXPLORATION_SCORE
+
+    def test_score_is_yield_times_tier_weight_minus_cost(self):
+        s = stats(entities=100.0, calls=10.0, avg_tier=1.0, last_used=NOW)
+        # 10 entities/call * 1.0 tier weight * 1.0 decay - cost
+        expected = 10.0 - NORMALIZED_COST["osm_api"]
+        assert strategy_score("osm_api", s, now=NOW) == pytest.approx(expected)
+
+    def test_better_yield_scores_higher(self):
+        good = stats(entities=100.0, calls=10.0)
+        bad = stats(entities=10.0, calls=10.0)
+        assert strategy_score("osm_api", good, now=NOW) > strategy_score(
+            "osm_api", bad, now=NOW
         )
 
-    def test_score_is_entities_per_call_times_novelty(self):
-        stats = {"s:t": {"total_entities": 20.0, "total_calls": 5.0, "total_novel": 10.0}}
-        # 4 entities/call * 0.5 novelty = 2.0
-        assert score_strategy("s", "t", stats) == pytest.approx(2.0)
+    def test_official_source_beats_social_at_equal_yield(self):
+        official = stats(avg_tier=1.0)
+        social = stats(avg_tier=4.0)
+        assert strategy_score("official_portals", official, now=NOW) > strategy_score(
+            "official_portals", social, now=NOW
+        )
 
-    def test_other_entity_type_does_not_leak(self):
-        stats = {
-            "osm_api:landmark": {"total_entities": 100.0, "total_calls": 1.0, "total_novel": 100.0}
-        }
-        assert score_strategy("osm_api", "regulatory_rule", stats) == 1.0
+    def test_cheaper_strategy_wins_at_equal_yield(self):
+        s = stats()
+        assert strategy_score("osm_api", s, now=NOW) > strategy_score(
+            "media_transcripts", s, now=NOW
+        )
+
+    def test_stale_strategy_loses_to_fresh_one(self):
+        fresh = stats(last_used=NOW)
+        stale = stats(last_used=NOW - timedelta(days=200))
+        assert strategy_score("web_crawls", fresh, now=NOW) > strategy_score(
+            "web_crawls", stale, now=NOW
+        )
+
+    def test_expensive_strategy_can_go_negative(self):
+        poor = stats(entities=1.0, calls=10.0, avg_tier=4.0)
+        assert strategy_score("media_transcripts", poor, now=NOW) < 0
+
+    def test_all_strategies_have_a_cost(self):
+        from ghkge.orchestrator.domain import STRATEGY_ENGINES
+
+        assert set(STRATEGY_ENGINES) <= set(NORMALIZED_COST)
+
+    def test_all_tiers_have_a_weight(self):
+        from ghkge.models.schemas import SourceTier
+
+        for tier in SourceTier:
+            assert int(tier) in TIER_WEIGHTS
 
 
 class TestRankStrategies:
-    def test_sorts_by_score_desc(self):
-        stats = {
-            "osm_api:landmark": {
-                "total_entities": 100.0, "total_calls": 10.0, "total_novel": 90.0
-            },
-            "web_crawls:landmark": {
-                "total_entities": 100.0, "total_calls": 10.0, "total_novel": 1.0
-            },
+    def test_untried_strategies_tie_and_keep_order(self):
+        ranked = rank_strategies(["a", "b", "c"], "landmark", {}, now=NOW)
+        assert sorted(ranked) == ["a", "b", "c"]
+
+    def test_proven_strategy_rises(self):
+        data = {
+            "web_crawls:landmark": stats(last_used=NOW),
+            "osm_api:landmark": StrategyStats(),  # never used
         }
-        ranked = rank_strategies(["web_crawls", "osm_api"], "landmark", stats)
-        assert ranked[0] == "osm_api"
+        # osm_api costs 0 but has no history; the proven crawler should still win.
+        ranked = rank_strategies(["web_crawls", "osm_api"], "landmark", data, now=NOW)
+        assert ranked[0] == "web_crawls"
 
-    def test_preserves_all_strategies(self):
-        strategies = ["a", "b", "c"]
-        assert sorted(rank_strategies(strategies, "t", {})) == strategies
+    def test_preserves_every_strategy(self):
+        strategies = ["a", "b", "c", "d"]
+        assert sorted(rank_strategies(strategies, "t", {}, now=NOW)) == strategies
 
-    def test_empty_list(self):
-        assert rank_strategies([], "t", {}) == []
+    def test_empty(self):
+        assert rank_strategies([], "t", {}, now=NOW) == []
+
+    def test_type_isolation(self):
+        data = {"web_crawls:landmark": stats(last_used=NOW)}
+        # The same strategy asked about a different entity type is untried.
+        assert strategy_score("web_crawls", data.get("web_crawls:regulatory_rule"), now=NOW) == (
+            EXPLORATION_SCORE
+        )
 
 
 class TestStaleness:
@@ -84,9 +167,9 @@ class TestStaleness:
             staleness_cutoff_days={"landmark": 5, "custom_thing": 2},
         )
         merged = staleness_cutoffs(config)
-        assert merged["landmark"] == 5  # overridden
-        assert merged["custom_thing"] == 2  # new
-        assert merged["regulatory_rule"] == 7  # default preserved
+        assert merged["landmark"] == 5
+        assert merged["custom_thing"] == 2
+        assert merged["regulatory_rule"] == 7
 
     def test_no_config_returns_defaults(self):
         assert staleness_cutoffs(None) == DEFAULT_STALENESS
