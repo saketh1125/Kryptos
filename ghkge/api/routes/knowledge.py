@@ -4,7 +4,7 @@ import uuid
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ghkge.consolidation.sync import generate_embedding
@@ -56,31 +56,76 @@ async def search_entities(
 ) -> EntitySearchResponse:
     """Hybrid search: structured filters + pgvector semantic ranking.
 
+    Three queries total, independent of the result count (D-04): the entity
+    scan, one best-insight-per-entity fetch, and one semantic-similarity
+    fetch. Previously this issued a separate SELECT per entity for its
+    snippet while scanning 500 rows, so a default 20-result page cost 500
+    round-trips and could not meet the 300ms NFR.
+
     Falls back to name/alias substring matching when embeddings are unavailable.
     """
+    # Candidate pool: wider than `limit` so ranking has something to choose
+    # from, but bounded so a broad query cannot pull the whole table.
+    scan_cap = min(max(limit * 5, 50), 500)
+
     stmt = select(Entity).where(Entity.status != "archived")
     if type:
         stmt = stmt.where(Entity.entity_type == type)
+
     if near and radius_m:
         try:
             lat_str, lng_str = near.split(",")
             origin_lat, origin_lng = float(lat_str), float(lng_str)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="near must be 'lat,lng'") from exc
-        # Grid cells are ~1.2km; widen the scan then filter precisely by distance.
-        candidates = (
-            (await session.execute(stmt.limit(500))).scalars().all()
-        )
-        filtered = [
+        # Cells are ~1.2km, so scan wide and then filter by true distance.
+        candidates = (await session.execute(stmt.limit(scan_cap))).scalars().all()
+        entities = [
             e
             for e in candidates
             if haversine_m(origin_lat, origin_lng, *_cell_center(e.grid_cell)) <= radius_m
-        ]
-        entities = filtered[:limit]
+        ][:limit]
     else:
-        entities = list((await session.execute(stmt.limit(500))).scalars().all())
+        entities = list((await session.execute(stmt.limit(scan_cap))).scalars().all())
 
-    # Semantic ranking via pgvector when a query and embeddings are available.
+    if not entities:
+        return EntitySearchResponse(results=[])
+
+    entity_ids = [e.id for e in entities]
+
+    # One query for the best approved insight per entity, rather than one per
+    # entity. A windowed row_number is standard SQL and portable across the
+    # Postgres deployment and the SQLite test database; DISTINCT ON is
+    # Postgres-only, and building two independent subqueries would
+    # cross-join them.
+    ranked_facts = (
+        select(
+            ExtractedFact.canonical_entity_id.label("entity_id"),
+            ExtractedFact.contextual_insight.label("insight"),
+            func.row_number()
+            .over(
+                partition_by=ExtractedFact.canonical_entity_id,
+                order_by=ExtractedFact.confidence_score.desc(),
+            )
+            .label("rn"),
+        )
+        .where(
+            ExtractedFact.canonical_entity_id.in_(entity_ids),
+            ExtractedFact.resolution_status == "approved",
+        )
+        .subquery()
+    )
+    snippet_rows = (
+        await session.execute(
+            select(ranked_facts.c.entity_id, ranked_facts.c.insight).where(
+                ranked_facts.c.rn == 1
+            )
+        )
+    ).all()
+    snippets: dict[uuid.UUID, str] = {eid: insight for eid, insight in snippet_rows if eid}
+
+    # Semantic ranking via pgvector, restricted to the candidate set so the
+    # `type` and `near` filters are honoured rather than applied afterwards.
     semantic: dict[uuid.UUID, float] = {}
     if q:
         vector = await generate_embedding(q)
@@ -91,16 +136,19 @@ async def search_entities(
                     await session.execute(
                         select(NarrativeChunk.entity_id, distance)
                         .where(
-                            NarrativeChunk.entity_id.is_not(None),
+                            NarrativeChunk.entity_id.in_(entity_ids),
                             NarrativeChunk.embedding.is_not(None),
                         )
                         .order_by(distance)
-                        .limit(200)
+                        .limit(len(entity_ids))
                     )
                 ).all()
-                for entity_id, distance in rows:
+                for entity_id, dist in rows:
                     if entity_id is not None:
-                        semantic[entity_id] = max(0.0, 1.0 - float(distance))
+                        # Keep the best (lowest) distance per entity: an
+                        # entity may have many narrative chunks.
+                        score = max(0.0, 1.0 - float(dist))
+                        semantic[entity_id] = max(semantic.get(entity_id, 0.0), score)
             except Exception:
                 logger.warning("knowledge.semantic_search_unavailable", exc_info=True)
                 semantic = {}
@@ -110,35 +158,20 @@ async def search_entities(
     for entity in entities:
         relevance = semantic.get(entity.id, 0.0)
         if q_lower:
-            if q_lower in entity.canonical_name.lower():
+            name_lower = entity.canonical_name.lower()
+            if q_lower in name_lower:
                 relevance = max(relevance, 0.9)
             elif any(q_lower in alias.lower() for alias in (entity.aliases or [])):
                 relevance = max(relevance, 0.8)
-            elif q_lower in (entity.canonical_name or "").lower():
-                relevance = max(relevance, 0.7)
         if not q and relevance == 0.0:
             relevance = 0.5
-
-        snippet = ""
-        fact_row = await session.execute(
-            select(ExtractedFact.contextual_insight)
-            .where(
-                ExtractedFact.canonical_entity_id == entity.id,
-                ExtractedFact.resolution_status == "approved",
-            )
-            .order_by(ExtractedFact.confidence_score.desc())
-            .limit(1)
-        )
-        best = fact_row.scalar_one_or_none()
-        if best:
-            snippet = best[:280]
 
         results.append(
             EntitySearchResult(
                 entity_id=entity.id,
                 canonical_name=entity.canonical_name,
                 relevance_score=round(float(relevance), 4),
-                snippet=snippet,
+                snippet=snippets.get(entity.id, "")[:280],
             )
         )
 

@@ -436,3 +436,80 @@ class TestNearbyRelationAllowList:
         for bad in ("0", "-1", "99"):
             r = c.get(f"/api/v1/entities/{entity_id}/nearby", params={"depth": bad})
             assert r.status_code == 422, f"depth={bad} should be rejected"
+
+
+class TestSearchQueryBudget:
+    """D-04: search must not scale queries with the number of results."""
+
+    async def _count_queries(self, client, factory, entities: int, **params):
+        """Run a search while counting the statements it executes."""
+        from sqlalchemy import event
+        from sqlalchemy.engine import Engine
+
+        counter = {"n": 0}
+
+        def _count(conn, cursor, statement, parameters, context, executemany):
+            counter["n"] += 1
+
+        async with factory() as session:
+            engine: Engine = session.get_bind()
+            event.listen(engine, "before_cursor_execute", _count)
+            try:
+                from ghkge.api.routes.knowledge import search_entities
+
+                # Route defaults are Query() objects; pass them explicitly.
+                args: dict = {
+                    "q": None,
+                    "type": None,
+                    "near": None,
+                    "radius_m": None,
+                    "limit": 20,
+                    **params,
+                }
+                await search_entities(session=session, **args)
+            finally:
+                event.remove(engine, "before_cursor_execute", _count)
+        return counter["n"]
+
+    async def test_query_count_does_not_grow_with_result_count(self, client, monkeypatch):
+        c, factory = client
+        import ghkge.api.routes.knowledge as kn
+
+        async def no_embed(text: str):
+            return None
+
+        monkeypatch.setattr(kn, "generate_embedding", no_embed)
+
+        async def seed(n: int):
+            async with factory() as s:
+                for i in range(n):
+                    e = Entity(
+                        canonical_name=f"Place {i}",
+                        entity_type="landmark",
+                        grid_cell=CELL,
+                        best_tier=2,
+                        corroboration_count=1,
+                    )
+                    s.add(e)
+                await s.commit()
+
+        await seed(5)
+        few = await self._count_queries(client, factory, 5, q="Place", limit=20)
+
+        await seed(45)
+        many = await self._count_queries(client, factory, 50, q="Place", limit=20)
+
+        assert many == few, (
+            f"query count grew with result count ({few} -> {many}); "
+            "the per-entity snippet N+1 has returned"
+        )
+        assert few <= 4, f"expected a fixed, small query count, got {few}"
+
+    async def test_snippet_is_highest_confidence_approved_fact(self, client):
+        c, factory = client
+        await _seed(factory)
+        r = c.get("/api/v1/entities/search", params={"q": "Darbhanga"})
+        results = r.json()["results"]
+        assert results
+        # The held fact must not be chosen even if it scored higher.
+        assert results[0]["snippet"] == "Swimming is prohibited here."
