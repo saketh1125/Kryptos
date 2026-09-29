@@ -1,6 +1,7 @@
 domain: "example_hyperlocal_domain"
 geography_bbox: [25.268, 82.980, 25.350, 83.030]
 coverage_target: 0.8
+grid_precision: 6
 staleness_cutoff_days:
   regulatory_rule: 7
   public_event: 1
@@ -22,3 +23,28 @@ entity_types:
   - name: "regulatory_rule"
     strategies: ["official_portals", "news_feeds"]
     safety_relevant: true
+
+# Seed sources per strategy. Public-access only — every URL still passes
+# ComplianceEngine (robots.txt, denylist, rate limit) before it is fetched.
+# A strategy with no seeds here is simply skipped; osm_api needs none because
+# Overpass queries are generated per grid cell.
+strategy_seeds:
+  official_portals:
+    - "https://varanasi.nic.in/"
+    - "https://varanasi.nic.in/tourist-place.aspx"
+    - "https://mohua.gov.in/"
+    - "https://censusindia.gov.in/"
+  news_feeds:
+    - "https://timesofindia.indiatimes.com/city/varanasi"
+    - "https://www.hindustantimes.com/cities/varanasi-news"
+  specialized_wikis:
+    - "https://en.wikipedia.org/wiki/Varanasi"
+    - "https://en.wikipedia.org/wiki/Category:Tourist_attractions_in_Varanasi"
+    - "https://en.wikipedia.org/wiki/Darbhanga_Ghat"
+  business_directories:
+    - "https://www.justdial.com/Varanasi"
+  social_media_crawls: []
+  web_crawls:
+    - "https://varanasi.nic.in/"
+    - "https://en.wikipedia.org/wiki/Varanasi"
+  media_transcripts: []

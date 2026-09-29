@@ -1,9 +1,8 @@
 """Basic tests for GHKGE modules."""
 
-import pytest
-from ghkge.synthesis.chunker import sliding_window_chunker
+from ghkge.consolidation.resolver import Resolution, resolve_conflict
 from ghkge.models.schemas import ExtractedFactSchema, SourceTier
-from ghkge.consolidation.resolver import resolve_conflict, Resolution
+from ghkge.synthesis.chunker import sliding_window_chunker
 
 
 class TestChunker:

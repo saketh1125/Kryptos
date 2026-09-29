@@ -20,7 +20,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ghkge.config.settings import settings
-from ghkge.database.connection import async_session_factory
+from ghkge.database.connection import session_factory
 from ghkge.database.models import Entity, GapQueue
 from ghkge.models.schemas import DomainConfig
 from ghkge.orchestrator.domain import load_domain_config
@@ -231,7 +231,7 @@ async def run_gap_evaluation(domain: str | None = None) -> int:
     domain = domain or settings.scheduler_default_domain
     config = load_domain_config()
     domain = domain or config.domain
-    async with async_session_factory() as session:
+    async with session_factory()() as session:
         gaps = await evaluate_coverage(session, domain, config)
         logger.info("gap_evaluator.scheduled_run", domain=domain, gaps=len(gaps))
         return len(gaps)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime
 
@@ -7,9 +8,45 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import ARRAY, TIMESTAMP, Float, ForeignKey, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.types import JSON, TypeDecorator
 
 from ghkge.config.settings import settings
 from ghkge.database.connection import Base
+
+
+class EmbeddingVector(TypeDecorator):
+    """pgvector embedding column that degrades to JSON text on non-PG dialects.
+
+    Keeps the real ``VECTOR(n)`` type on Postgres while letting the test suite
+    (and any SQLite-based tooling) store and read embeddings as JSON.
+    """
+
+    impl = Vector
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):  # type: ignore[no-untyped-def]
+        if dialect.name == "sqlite":
+            return dialect.type_descriptor(Text())
+        return dialect.type_descriptor(Vector(settings.embedding_dim))
+
+    def process_bind_param(self, value, dialect):  # type: ignore[no-untyped-def]
+        if dialect.name == "sqlite" and isinstance(value, list):
+            return json.dumps(value)
+        return value
+
+    def process_result_value(self, value, dialect):  # type: ignore[no-untyped-def]
+        if dialect.name == "sqlite" and isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return None
+        return value
+
+
+# Dialect variants keep the models portable: the same ORM classes run on
+# Postgres in production and on SQLite in the test suite.
+StringArray = ARRAY(Text).with_variant(JSON, "sqlite")
+Vector768 = EmbeddingVector()
 
 
 class AcquisitionRun(Base):
@@ -58,7 +95,7 @@ class Entity(Base):
     canonical_name: Mapped[str] = mapped_column(String(255), nullable=False)
     entity_type: Mapped[str] = mapped_column(String(100), nullable=False)
     grid_cell: Mapped[str] = mapped_column(String(50), nullable=False)
-    aliases: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
+    aliases: Mapped[list[str]] = mapped_column(StringArray, default=list)
     best_tier: Mapped[int] = mapped_column(Integer, nullable=False)
     corroboration_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     last_verified: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
@@ -142,7 +179,7 @@ class NarrativeChunk(Base):
     entity_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("entities.id", ondelete="CASCADE"), nullable=True)
     raw_capture_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("raw_captures.id", ondelete="CASCADE"), nullable=True)
     chunk_text: Mapped[str] = mapped_column(Text, nullable=False)
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(settings.embedding_dim), nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector768, nullable=True)
     source_tier: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
 

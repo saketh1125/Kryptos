@@ -15,7 +15,7 @@ from typing import Any
 
 import structlog
 
-from ghkge.database.connection import async_session_factory
+from ghkge.database.connection import session_factory
 from ghkge.database.models import AcquisitionRun, GapQueue, StrategyYieldLog, TaskQueue
 from ghkge.orchestrator import bus
 
@@ -30,7 +30,7 @@ async def submit_run(
     trigger: str = "manual",
 ) -> AcquisitionRun:
     """Create an acquisition run and enqueue its plan task."""
-    async with async_session_factory() as session:
+    async with session_factory()() as session:
         run = AcquisitionRun(
             domain=domain,
             trigger=trigger,
@@ -99,7 +99,7 @@ async def finalize_run_if_done(run_id: uuid.UUID) -> bool:
     """Stamp a run complete once no active tasks remain. Returns True if finalized."""
     from sqlalchemy import select
 
-    async with async_session_factory() as session:
+    async with session_factory()() as session:
         active = await bus.count_active_tasks(run_id)
         if active > 0:
             return False
@@ -149,7 +149,7 @@ async def finalize_run_if_done(run_id: uuid.UUID) -> bool:
 
 async def reap_gap(gap_id: uuid.UUID, resolution: str) -> GapQueue:
     """Resolve a gap: 'skip' closes it, 'retry' re-opens it for the next planner pass."""
-    async with async_session_factory() as session:
+    async with session_factory()() as session:
         gap = await session.get(GapQueue, gap_id)
         if gap is None:
             raise LookupError(gap_id)
@@ -160,5 +160,5 @@ async def reap_gap(gap_id: uuid.UUID, resolution: str) -> GapQueue:
 
 
 async def run_status(run_id: uuid.UUID) -> AcquisitionRun | None:
-    async with async_session_factory() as session:
+    async with session_factory()() as session:
         return await session.get(AcquisitionRun, run_id)

@@ -45,6 +45,23 @@ async def get_session() -> AsyncSession:  # type: ignore[misc]
         yield session
 
 
+def session_factory() -> async_sessionmaker[AsyncSession]:
+    """Return the live session factory.
+
+    Callers must resolve the factory through this accessor rather than importing
+    the module-level name, which binds at import time and cannot be swapped.
+    """
+    if async_session_factory is None:
+        raise RuntimeError("Database not initialized. Call init_db() first.")
+    return async_session_factory
+
+
+def set_session_factory(factory: async_sessionmaker[AsyncSession] | None) -> None:
+    """Override the session factory (used by the test suite)."""
+    global async_session_factory
+    async_session_factory = factory
+
+
 async def close_db() -> None:
     """Dispose of the database engine."""
     global engine

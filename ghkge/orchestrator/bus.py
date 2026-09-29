@@ -81,10 +81,10 @@ async def enqueue(
 
 async def claim_tasks(task_type: str, limit: int = 5) -> list[TaskQueue]:
     """Atomically claim up to ``limit`` pending tasks of a type."""
-    from ghkge.database.connection import async_session_factory
+    from ghkge.database.connection import session_factory
 
     now = datetime.now(UTC)
-    async with async_session_factory() as session:
+    async with session_factory()() as session:
         stmt = (
             select(TaskQueue)
             .where(TaskQueue.task_type == task_type, TaskQueue.status == "pending")
@@ -106,10 +106,10 @@ async def claim_tasks(task_type: str, limit: int = 5) -> list[TaskQueue]:
 
 async def complete_task(task_id: uuid.UUID, result: dict[str, Any] | None = None) -> None:
     """Mark a task done with its result payload."""
-    from ghkge.database.connection import async_session_factory
+    from ghkge.database.connection import session_factory
 
     now = datetime.now(UTC)
-    async with async_session_factory() as session:
+    async with session_factory()() as session:
         task = await session.get(TaskQueue, task_id)
         if task is None:
             logger.warning("bus.task_not_found", task_id=str(task_id))
@@ -128,9 +128,9 @@ async def fail_task(
     requeue_delay_s: float = 0.0,
 ) -> None:
     """Fail a task; requeue for retry when attempts remain, else mark failed."""
-    from ghkge.database.connection import async_session_factory
+    from ghkge.database.connection import session_factory
 
-    async with async_session_factory() as session:
+    async with session_factory()() as session:
         task = await session.get(TaskQueue, task_id)
         if task is None:
             logger.warning("bus.task_not_found", task_id=str(task_id))
@@ -148,9 +148,7 @@ async def fail_task(
             task.status = "failed"
             task.completed_at = datetime.now(UTC)
         await session.commit()
-        level = "info" if can_retry else "error"
-        logger.log(
-            level,
+        logger.info(
             "bus.task_failed",
             task_id=str(task_id),
             task_type=task.task_type,
@@ -162,11 +160,11 @@ async def fail_task(
 
 async def reclaim_stale_tasks(max_age_minutes: int = 10) -> int:
     """Requeue tasks stuck in_progress (e.g. worker crashed mid-flight)."""
-    from ghkge.database.connection import async_session_factory
+    from ghkge.database.connection import session_factory
 
     cutoff = datetime.now(UTC) - timedelta(minutes=max_age_minutes)
     reclaimed = 0
-    async with async_session_factory() as session:
+    async with session_factory()() as session:
         stmt = select(TaskQueue).where(
             TaskQueue.status == "in_progress", TaskQueue.claimed_at < cutoff
         )
@@ -185,9 +183,9 @@ async def reclaim_stale_tasks(max_age_minutes: int = 10) -> int:
 
 async def count_active_tasks(run_id: uuid.UUID) -> int:
     """Number of pending/in_progress tasks belonging to a run."""
-    from ghkge.database.connection import async_session_factory
+    from ghkge.database.connection import session_factory
 
-    async with async_session_factory() as session:
+    async with session_factory()() as session:
         stmt = (
             select(func.count())
             .select_from(TaskQueue)
