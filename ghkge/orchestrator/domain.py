@@ -35,7 +35,9 @@ STRATEGY_ENGINES: dict[str, str] = {
 OSM_TAG_FILTERS: dict[str, str] = {
     "landmark": 'node["tourism"]({bbox});node["historic"]({bbox});',
     "local_business": 'node["shop"]({bbox});node["amenity"]({bbox});',
-    "transit_route": 'node["highway"~"bus_stop|tram_stop"]({bbox});node["railway"="station"]({bbox});',
+    "transit_route": (
+        'node["highway"~"bus_stop|tram_stop"]({bbox});node["railway"="station"]({bbox});'
+    ),
 }
 
 _config_cache: dict[str, DomainConfig] = {}

@@ -35,7 +35,9 @@ async def load_yield_stats(session: AsyncSession) -> dict[str, dict[str, float]]
     return stats
 
 
-def score_strategy(strategy: str, entity_type: str, yield_stats: dict[str, dict[str, float]]) -> float:
+def score_strategy(
+    strategy: str, entity_type: str, yield_stats: dict[str, dict[str, float]]
+) -> float:
     """Yield score for a strategy: entities-per-call x novelty-rate.
 
     Untried strategies get a neutral 1.0 so exploration is not starved by

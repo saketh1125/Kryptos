@@ -42,7 +42,9 @@ class RateLimiter(Protocol):
 class RobotsCache:
     """Caches robots.txt parsers per domain with TTL."""
 
-    def __init__(self, ttl_hours: int = 24, transport: httpx.AsyncBaseTransport | None = None) -> None:
+    def __init__(
+        self, ttl_hours: int = 24, transport: httpx.AsyncBaseTransport | None = None
+    ) -> None:
         self.ttl_hours = ttl_hours
         self._transport = transport
         self._cache: dict[str, tuple[float, RobotFileParser]] = {}

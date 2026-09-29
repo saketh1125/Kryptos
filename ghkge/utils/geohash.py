@@ -7,8 +7,9 @@ bbox (used by the gap evaluator's bootstrap coverage scan).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from math import asin, cos, radians, sin, sqrt
-from typing import Final, Sequence
+from typing import Final
 
 BASE32: Final = "0123456789bcdefghjkmnpqrstuvwxyz"
 _BITS: Final = (16, 8, 4, 2, 1)

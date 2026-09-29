@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from contextlib import asynccontextmanager
 
 import structlog
@@ -8,17 +9,22 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from ghkge.api.routes import knowledge, orchestration
 from ghkge.database.connection import close_db, init_db
+from ghkge.orchestrator.scheduler import start_background, stop_background
 
 logger = structlog.get_logger()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan: startup and shutdown."""
+    """Application lifespan: DB, background workers, scheduler."""
     logger.info("app.starting")
     await init_db()
+    with contextlib.suppress(Exception):
+        await start_background()
     logger.info("app.started")
     yield
+    with contextlib.suppress(Exception):
+        await stop_background()
     await close_db()
     logger.info("app.stopped")
 
@@ -29,7 +35,7 @@ app = FastAPI(
         "Domain-agnostic, strategy-adaptive hyperlocal knowledge"
         " acquisition and serving system."
     ),
-    version="0.1.0",
+    version="1.0.0",
     lifespan=lifespan,
 )
 
@@ -41,8 +47,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(orchestration.router)
 app.include_router(knowledge.router)
+app.include_router(orchestration.router)
 
 
 @app.get("/health")

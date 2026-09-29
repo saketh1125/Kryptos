@@ -1,126 +1,164 @@
+"""Run lifecycle: submit, finalize, and aggregate strategy yield.
+
+A run is created, a single ``plan`` task is enqueued, and the worker agents
+chase it through harvest -> extract -> consolidate. When the last task for a
+run settles, :func:`finalize_run_if_done` stamps counters, writes
+``strategy_yield_log`` rows the planner scores on next cycle, and re-opens
+gaps whose chains failed.
+"""
+
 from __future__ import annotations
 
-import contextlib
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import structlog
-from sqlalchemy import select
 
-from ghkge.compliance.engine import ComplianceEngine
-from ghkge.compliance.rate_limiter import PostgresRateLimiter
-from ghkge.config.settings import settings
 from ghkge.database.connection import async_session_factory
-from ghkge.database.models import (
-    AcquisitionRun,
-    GapQueue,
-)
-from ghkge.harvesters.api_client import APIHarvester
-from ghkge.harvesters.document import DocumentHarvester
-from ghkge.harvesters.media import MediaHarvester
-from ghkge.harvesters.web import WebHarvester
-from ghkge.orchestrator.planner import plan_strategies
+from ghkge.database.models import AcquisitionRun, GapQueue, StrategyYieldLog, TaskQueue
+from ghkge.orchestrator import bus
 
 logger = structlog.get_logger()
 
+TERMINAL_STATUSES = ("done", "failed")
 
-async def execute_run(
-    run_id: str,
+
+async def submit_run(
     domain: str,
     entity_types: list[str] | None = None,
-) -> None:
-    """Execute a full acquisition run: plan -> harvest -> extract -> consolidate."""
-    run_uuid = uuid.UUID(run_id)
+    trigger: str = "manual",
+) -> AcquisitionRun:
+    """Create an acquisition run and enqueue its plan task."""
+    async with async_session_factory() as session:
+        run = AcquisitionRun(
+            domain=domain,
+            trigger=trigger,
+            status="queued",
+            started_at=datetime.now(UTC),
+        )
+        session.add(run)
+        await session.flush()
+
+        await bus.enqueue(
+            session,
+            bus.TASK_PLAN,
+            bus.AGENT_PLANNER,
+            {"domain": domain, "entity_types": entity_types or [], "run_id": str(run.id)},
+            source_agent="api",
+            run_id=run.id,
+        )
+        await session.commit()
+        await session.refresh(run)
+        logger.info("run.submitted", run_id=str(run.id), domain=domain, trigger=trigger)
+        return run
+
+
+async def _aggregate_yield(session: Any, run_id: uuid.UUID) -> None:
+    """Write strategy_yield_log rows from this run's task results."""
+    from sqlalchemy import select
+
+    tasks = (
+        (await session.execute(select(TaskQueue).where(TaskQueue.run_id == run_id)))
+        .scalars()
+        .all()
+    )
+
+    stats: dict[tuple[str, str], dict[str, float]] = {}
+    for task in tasks:
+        payload = task.payload or {}
+        strategy = payload.get("strategy", "")
+        entity_type = payload.get("entity_type", "")
+        if not strategy or not entity_type:
+            continue
+        key = (strategy, entity_type)
+        entry = stats.setdefault(
+            key, {"calls": 0.0, "entities": 0.0, "novel": 0.0, "confidence": 0.0, "n": 0.0}
+        )
+        result = task.result or {}
+        if task.task_type == bus.TASK_HARVEST and result.get("fetched"):
+            entry["calls"] += 1
+        elif task.task_type == bus.TASK_CONSOLIDATE:
+            entry["entities"] += float(result.get("consolidated", 0) or 0)
+            entry["novel"] += float(result.get("created", 0) or 0)
+
+    for (strategy, entity_type), s in stats.items():
+        session.add(
+            StrategyYieldLog(
+                strategy_name=strategy,
+                entity_type=entity_type,
+                run_id=run_id,
+                calls_made=int(s["calls"]),
+                entities_found=int(s["entities"]),
+                novel_entities=int(s["novel"]),
+            )
+        )
+
+
+async def finalize_run_if_done(run_id: uuid.UUID) -> bool:
+    """Stamp a run complete once no active tasks remain. Returns True if finalized."""
+    from sqlalchemy import select
 
     async with async_session_factory() as session:
-        # Update run status
-        stmt = select(AcquisitionRun).where(AcquisitionRun.id == run_uuid)
-        result = await session.execute(stmt)
-        run = result.scalar_one_or_none()
-        if run is None:
-            logger.error("pipeline.run_not_found", run_id=run_id)
-            return
+        active = await bus.count_active_tasks(run_id)
+        if active > 0:
+            return False
 
-        run.status = "running"
-        run.started_at = datetime.now(UTC)
+        run = await session.get(AcquisitionRun, run_id)
+        if run is None or run.status in ("completed", "failed", "partial"):
+            return False
+
+        tasks = (
+            (await session.execute(select(TaskQueue).where(TaskQueue.run_id == run_id)))
+            .scalars()
+            .all()
+        )
+
+        facts = sum(
+            int((t.result or {}).get("facts", 0) or 0)
+            for t in tasks
+            if t.task_type == bus.TASK_EXTRACT
+        )
+        entities = sum(
+            int((t.result or {}).get("consolidated", 0) or 0)
+            for t in tasks
+            if t.task_type == bus.TASK_CONSOLIDATE
+        )
+        errors = [t.last_error for t in tasks if t.status == "failed" and t.last_error]
+
+        await _aggregate_yield(session, run_id)
+        await bus.reset_run_gaps_to_open(session, run_id)
+
+        run.facts_extracted = facts
+        run.entities_written = entities
+        run.errors = errors
+        run.completed_at = datetime.now(UTC)
+        run.status = "partial" if errors else "completed"
         await session.commit()
 
-        try:
-            # Initialize compliance engine
-            try:
-                import asyncpg
+        logger.info(
+            "run.finalized",
+            run_id=str(run_id),
+            status=run.status,
+            facts_extracted=facts,
+            entities_written=entities,
+            errors=len(errors),
+        )
+        return True
 
-                db_url = settings.database_url.replace("+asyncpg", "")
-                pg_pool = await asyncpg.create_pool(db_url, min_size=2, max_size=5)
-                rate_limiter = PostgresRateLimiter(pg_pool)
-            except Exception:
-                logger.warning("pipeline.rate_limiter_init_failed", exc_info=True)
-                rate_limiter = None
 
-            compliance = ComplianceEngine(rate_limiter=rate_limiter)
+async def reap_gap(gap_id: uuid.UUID, resolution: str) -> GapQueue:
+    """Resolve a gap: 'skip' closes it, 'retry' re-opens it for the next planner pass."""
+    async with async_session_factory() as session:
+        gap = await session.get(GapQueue, gap_id)
+        if gap is None:
+            raise LookupError(gap_id)
+        gap.status = "open" if resolution == "retry" else "resolved"
+        await session.commit()
+        await session.refresh(gap)
+        return gap
 
-            # Initialize harvesters
-            harvesters = {
-                "web_crawls": WebHarvester(compliance),
-                "osm_api": APIHarvester(compliance),
-                "api_query": APIHarvester(compliance),
-                "doc_parse": DocumentHarvester(compliance),
-                "media_transcripts": MediaHarvester(compliance),
-            }
 
-            # Plan strategies
-            tasks = await plan_strategies(session, domain, entity_types)
-            await session.commit()
-
-            facts_extracted = 0
-            entities_written = 0
-
-            for task in tasks:
-                strategy = task["strategy"]
-                entity_type = task["entity_type"]
-
-                harvester = harvesters.get(strategy)
-                if harvester is None:
-                    logger.warning("pipeline.unknown_strategy", strategy=strategy)
-                    continue
-
-                # For web crawls, we need a URL - in production this comes from
-                # search APIs or gap metadata. For now, log the intent.
-                logger.info(
-                    "pipeline.executing_task",
-                    strategy=strategy,
-                    entity_type=entity_type,
-                    grid_cell=task["grid_cell"],
-                )
-
-                # Mark gap as in progress
-                gap_id = uuid.UUID(task["gap_id"])
-                gap_stmt = select(GapQueue).where(GapQueue.id == gap_id)
-                gap_result = await session.execute(gap_stmt)
-                gap = gap_result.scalar_one_or_none()
-                if gap:
-                    gap.status = "in_progress"
-                    await session.commit()
-
-            # Update run completion
-            run.status = "completed"
-            run.completed_at = datetime.now(UTC)
-            await session.commit()
-
-            logger.info(
-                "pipeline.run_complete",
-                run_id=run_id,
-                facts_extracted=facts_extracted,
-                entities_written=entities_written,
-            )
-
-        except Exception as e:
-            run.status = "failed"
-            run.completed_at = datetime.now(UTC)
-            await session.commit()
-            logger.error("pipeline.run_failed", run_id=run_id, error=str(e), exc_info=True)
-
-        finally:
-            if rate_limiter is not None:
-                with contextlib.suppress(Exception):
-                    await pg_pool.close()  # type: ignore
+async def run_status(run_id: uuid.UUID) -> AcquisitionRun | None:
+    async with async_session_factory() as session:
+        return await session.get(AcquisitionRun, run_id)
