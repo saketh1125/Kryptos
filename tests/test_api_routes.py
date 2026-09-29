@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
 from sqlalchemy.dialects.postgresql import JSONB
@@ -361,3 +362,57 @@ class TestOrchestrationApi:
     async def test_run_status_404(self, client):
         c, _ = client
         assert c.get(f"/admin/v1/runs/{uuid.uuid4()}").status_code == 404
+
+
+class TestNearbyRelationAllowList:
+    """D-01: `relation` is interpolated into Cypher, so it must be allow-listed."""
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "NEAR]-() DETACH DELETE n //",
+            "NEAR` RETURN 1 //",
+            "near",
+            "NEAR; MATCH (a) DELETE a",
+            "",
+            "*",
+            "NEAR-[:HAS_AMENITY",
+        ],
+    )
+    async def test_rejects_non_allowlisted_relation(self, client, payload: str):
+        c, factory = client
+        entity_id, _ = await _seed(factory)
+        r = c.get(
+            f"/api/v1/entities/{entity_id}/nearby",
+            params={"relation": payload},
+        )
+        assert r.status_code == 400, f"expected rejection for {payload!r}"
+
+    @pytest.mark.parametrize(
+        "relation", ["NEAR", "ACCESSIBLE_VIA", "HAS_AMENITY", "PART_OF", "SUBJECT_TO_RULE"]
+    )
+    async def test_accepts_allowlisted_relations(self, client, relation: str):
+        c, factory = client
+        entity_id, _ = await _seed(factory)
+        r = c.get(
+            f"/api/v1/entities/{entity_id}/nearby",
+            params={"relation": relation},
+        )
+        # Neo4j is absent in tests, so the same-cell fallback answers.
+        assert r.status_code == 200
+
+    async def test_validation_precedes_entity_lookup(self, client):
+        """A bad relation is a 400 even for a nonexistent entity."""
+        c, _ = client
+        r = c.get(
+            f"/api/v1/entities/{uuid.uuid4()}/nearby",
+            params={"relation": "NEAR]-(n) DETACH DELETE n //"},
+        )
+        assert r.status_code == 400
+
+    async def test_depth_is_bounded(self, client):
+        c, factory = client
+        entity_id, _ = await _seed(factory)
+        for bad in ("0", "-1", "99"):
+            r = c.get(f"/api/v1/entities/{entity_id}/nearby", params={"depth": bad})
+            assert r.status_code == 422, f"depth={bad} should be rejected"

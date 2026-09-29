@@ -190,14 +190,27 @@ async def get_entity(
     )
 
 
+# Relationship types the API will traverse. Anything else is rejected before
+# it can reach a Cypher string (D-01: the parameter is interpolated).
+ALLOWED_RELATIONS: frozenset[str] = frozenset(
+    {"NEAR", "ACCESSIBLE_VIA", "HAS_AMENITY", "PART_OF", "SUBJECT_TO_RULE"}
+)
+
+
 @router.get("/entities/{entity_id}/nearby", response_model=NearbyResponse)
 async def get_nearby(
     entity_id: uuid.UUID,
-    relation: str = "NEAR",
+    relation: str = Query("NEAR", description="Relationship type to traverse"),
     depth: int = Query(1, ge=1, le=3),
     session: AsyncSession = Depends(get_session),
 ) -> NearbyResponse:
     """Graph traversal from Neo4j; falls back to same-grid-cell neighbours."""
+    if relation not in ALLOWED_RELATIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown relation '{relation}'. Allowed: {sorted(ALLOWED_RELATIONS)}",
+        )
+
     entity = await session.get(Entity, entity_id)
     if entity is None:
         raise HTTPException(status_code=404, detail="Entity not found")
@@ -207,6 +220,8 @@ async def get_nearby(
 
         driver = _get_neo4j_driver()
         async with driver.session() as neo_session:
+            # relation is allow-listed above and depth is an int bounded by Query;
+            # both are safe to interpolate. Entity ids remain bound parameters.
             result = await neo_session.run(
                 f"""
                 MATCH (src:Entity {{id: $id}})-[:{relation}*1..{depth}]-(n:Entity)
