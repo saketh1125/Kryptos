@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     scheduler_default_domain: str = ""
 
     # API
+    # Shared secret for /admin/v1. Unset = open (fine for local dev, not for a
+    # reachable deployment). See ghkge/api/auth.py.
+    admin_api_key: str = ""
+    cors_allow_origins: list[str] = []
     json_logging: bool = False
     api_host: str = "0.0.0.0"
     api_port: int = 8000

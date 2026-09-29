@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ghkge.api.auth import require_admin_key
 from ghkge.database.connection import get_session
 from ghkge.database.models import ExtractedFact, GapQueue, StrategyYieldLog
 from ghkge.models.schemas import (
@@ -28,7 +29,13 @@ from ghkge.orchestrator.pipeline import reap_gap, submit_run
 
 logger = structlog.get_logger()
 
-router = APIRouter(prefix="/admin/v1", tags=["orchestration"])
+# Every route here mutates state the public API serves, so the whole router
+# is gated rather than individual handlers (D-07).
+router = APIRouter(
+    prefix="/admin/v1",
+    tags=["orchestration"],
+    dependencies=[Depends(require_admin_key)],
+)
 
 
 @router.post("/runs", response_model=RunCreateResponse, status_code=202)

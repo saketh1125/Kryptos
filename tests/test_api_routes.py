@@ -513,3 +513,58 @@ class TestSearchQueryBudget:
         assert results
         # The held fact must not be chosen even if it scored higher.
         assert results[0]["snippet"] == "Swimming is prohibited here."
+
+
+class TestAdminAuth:
+    """D-07: /admin/v1 mutates what the public API serves, so it is gated."""
+
+    @pytest.fixture
+    def keyed(self, monkeypatch):
+        from ghkge.config.settings import settings
+
+        monkeypatch.setattr(settings, "admin_api_key", "s3cret-key")
+        return "s3cret-key"
+
+    @pytest.mark.parametrize(
+        "method,path",
+        [
+            ("get", "/admin/v1/gaps?domain=x"),
+            ("post", "/admin/v1/runs"),
+            ("get", "/admin/v1/strategies/yield"),
+            ("get", "/admin/v1/facts"),
+        ],
+    )
+    async def test_rejects_without_key(self, client, keyed, method, path):
+        c, _ = client
+        body = {"domain": "x"} if method == "post" else None
+        r = getattr(c, method)(path, **({"json": body} if body else {}))
+        assert r.status_code == 401, f"{method.upper()} {path} should require the key"
+
+    async def test_rejects_wrong_key(self, client, keyed):
+        c, _ = client
+        r = c.get("/admin/v1/gaps?domain=x", headers={"X-Admin-Key": "wrong"})
+        assert r.status_code == 401
+
+    async def test_accepts_correct_key(self, client, keyed):
+        c, _ = client
+        r = c.get("/admin/v1/gaps?domain=x", headers={"X-Admin-Key": keyed})
+        assert r.status_code == 200
+
+    async def test_knowledge_api_stays_public(self, client, keyed):
+        """The consumer API must not be gated by the admin key."""
+        c, factory = client
+        await _seed(factory)
+        assert c.get("/api/v1/entities/search").status_code == 200
+        assert c.get("/health").status_code == 200
+
+    async def test_open_when_no_key_configured(self, client, monkeypatch):
+        from ghkge.config.settings import settings
+
+        monkeypatch.setattr(settings, "admin_api_key", "")
+        c, _ = client
+        assert c.get("/admin/v1/gaps?domain=x").status_code == 200
+
+    async def test_empty_key_header_is_rejected(self, client, keyed):
+        c, _ = client
+        r = c.get("/admin/v1/gaps?domain=x", headers={"X-Admin-Key": ""})
+        assert r.status_code == 401

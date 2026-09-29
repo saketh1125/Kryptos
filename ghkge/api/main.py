@@ -7,6 +7,7 @@ import structlog
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from ghkge.api.auth import admin_key_configured
 from ghkge.api.routes import knowledge, orchestration
 from ghkge.config.settings import settings
 from ghkge.database.connection import close_db, init_db, schema_is_current
@@ -46,6 +47,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         problems.append(f"workers/scheduler failed to start: {exc}")
         logger.error("app.background_start_failed", error=str(exc), exc_info=True)
 
+    if not admin_key_configured():
+        logger.warning(
+            "app.admin_api_unprotected",
+            detail=(
+                "GHKGE_ADMIN_API_KEY is unset, so /admin/v1 is open to anyone "
+                "who can reach this process. Set it for any shared deployment."
+            ),
+        )
+
     if problems:
         app.state.startup_problems = problems
         for problem in problems:
@@ -76,9 +86,12 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
+    # An explicit allowlist. Wildcard origins combined with credentials is a
+    # misconfiguration: browsers reject it, and `*` would admit any site to
+    # the admin API (D-07).
+    allow_origins=settings.cors_allow_origins,
+    allow_credentials=bool(settings.cors_allow_origins),
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
