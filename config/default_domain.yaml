@@ -1,33 +1,85 @@
-domain: "example_hyperlocal_domain"
+# Domain configuration — Varanasi, Uttar Pradesh.
+#
+# This file is the whole domain abstraction (KRY-PRD-001 FR-1). A new city is a
+# new YAML, not a new scraper. Two things live here:
+#
+#   entity_types  — the ontology: what exists, and which strategies rank where.
+#   source_tiers  — how much each source is trusted (KRY-DQV-001 §3). This is
+#                   data, not code, so trust can be corrected per deployment
+#                   without a release.
+#
+# Every seed URL is still gated by ComplianceEngine before it is fetched:
+# robots.txt, the denylist, platform policy and the per-domain rate limit.
+
+domain: "varanasi_guide"
 geography_bbox: [25.268, 82.980, 25.350, 83.030]
 coverage_target: 0.8
+
+# Geohash precision. 6 is roughly 1.2km x 0.6km cells, which is the
+# granularity hyperlocal questions are asked at.
 grid_precision: 6
+
+# Age after which an entity is re-verified, in days, per entity type.
 staleness_cutoff_days:
   regulatory_rule: 7
   public_event: 1
   local_business: 30
   landmark: 90
+  transit_route: 60
+
 entity_types:
   - name: "landmark"
-    strategies: ["osm_api", "specialized_wikis", "media_transcripts"]
+    strategies: ["osm_api", "specialized_wikis", "official_portals"]
     safety_relevant: false
   - name: "local_business"
-    strategies: ["business_directories", "web_crawls", "social_media_crawls"]
+    strategies: ["business_directories", "web_crawls"]
     safety_relevant: false
   - name: "public_event"
-    strategies: ["official_portals", "news_feeds", "social_media_crawls"]
+    strategies: ["news_feeds", "official_portals"]
     safety_relevant: false
   - name: "transit_route"
-    strategies: ["osm_api", "official_portals", "web_crawls"]
+    strategies: ["osm_api", "official_portals"]
     safety_relevant: false
   - name: "regulatory_rule"
     strategies: ["official_portals", "news_feeds"]
     safety_relevant: true
 
-# Seed sources per strategy. Public-access only — every URL still passes
-# ComplianceEngine (robots.txt, denylist, rate limit) before it is fetched.
-# A strategy with no seeds here is simply skipped; osm_api needs none because
-# Overpass queries are generated per grid cell.
+# Source trust, per KRY-DQV-001:
+#   1 OFFICIAL        government / statutory publication
+#   2 CURATED         edited encyclopaedia, established press
+#   3 SOCIAL_VERIFIED moderated community source
+#   4 SOCIAL_GENERAL  unmoderated, blog-tier
+#
+# Entries are matched against the registrable domain, most specific first.
+# The first match wins; anything unlisted falls back to OFFICIAL_SOURCE_TIERS,
+# which is deliberately conservative.
+source_tiers:
+  # Tier 1 — statutory. Tier-1 sources approve safety facts outright, so this
+  # list is the difference between the safety surface being useful and empty.
+  - domains: ["varanasi.nic.in", "up.gov.in", "gov.in", "nic.in", "mohua.gov.in", "india.gov.in"]
+    tier: 1
+  - domains: ["openstreetmap.org", "overpass-api.de"]
+    tier: 1  # KRY-DQV-001 classes OSM as authoritative for mapped features
+  # Tier 2 — curated reference and press.
+  - domains: ["wikipedia.org", "en.wikipedia.org", "wikimedia.org", "britannica.com"]
+    tier: 2
+  - domains:
+      - "timesofindia.indiatimes.com"
+      - "hindustantimes.com"
+      - "thehindu.com"
+      - "indianexpress.com"
+      - "pib.gov.in"
+    tier: 2
+  # Tier 3 — moderated community sources.
+  - domains: ["reddit.com", "quora.com", "tripadvisor.com"]
+    tier: 3
+  # Tier 4 — everything else, including unknown blogs.
+  - domains: []
+    tier: 4
+
+# Seed sources per strategy. Public-access only. A strategy with no seeds is
+# skipped by the planner rather than silently producing no work, so keep this
+# list in step with the strategies named above.
 strategy_seeds:
   official_portals:
     - "https://varanasi.nic.in/"
@@ -43,8 +95,6 @@ strategy_seeds:
     - "https://en.wikipedia.org/wiki/Darbhanga_Ghat"
   business_directories:
     - "https://www.justdial.com/Varanasi"
-  social_media_crawls: []
   web_crawls:
     - "https://varanasi.nic.in/"
     - "https://en.wikipedia.org/wiki/Varanasi"
-  media_transcripts: []

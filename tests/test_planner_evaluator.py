@@ -179,25 +179,62 @@ class TestStaleness:
 
 
 class TestSourceTierMapping:
+    """D-06: trust is domain data, not a hardcoded suffix heuristic."""
+
     @pytest.mark.parametrize(
         "domain,expected",
         [
             ("varanasi.nic.in", 1),
             ("data.gov.in", 1),
-            ("city.gov", 1),
+            ("mohua.gov.in", 1),
+            # OSM is authoritative for mapped features: KRY-DQV-001 §3.
+            ("openstreetmap.org", 1),
+            ("overpass-api.de", 1),
             ("en.wikipedia.org", 2),
-            ("openstreetmap.org", 2),
-            ("example.org", 2),
+            ("wikipedia.org", 2),
+            # Established press is curated, not social-general.
+            ("timesofindia.indiatimes.com", 2),
+            ("thehindu.com", 2),
+            ("reddit.com", 3),
             ("randomblog.com", 4),
-            ("reddit.com", 4),
+            ("example.org", 4),
+            ("", 4),
         ],
     )
     def test_tiers(self, domain: str, expected: int):
         assert source_tier_for_domain(domain) == expected
 
-    def test_tier_ordering_is_documented(self):
-        assert source_tier_for_domain("x.nic.in") < source_tier_for_domain("x.org")
-        assert source_tier_for_domain("x.org") < source_tier_for_domain("x.com")
+    def test_subdomain_matches_parent_rule(self):
+        assert source_tier_for_domain("m.city.gov.in") == 1
+        assert source_tier_for_domain("deep.sub.wikipedia.org") == 2
+
+    def test_www_prefix_is_ignored(self):
+        assert source_tier_for_domain("www.varanasi.nic.in") == 1
+
+    def test_tier3_is_reachable(self):
+        """Tier 3 existed in the spec but no input could ever reach it."""
+        assert source_tier_for_domain("reddit.com") == 3
+
+    def test_unknown_source_is_conservative(self):
+        assert source_tier_for_domain("some-random-site.example") == 4
+
+    def test_config_can_override_trust(self):
+        """Trust must be correctable per deployment without a code change."""
+        from ghkge.models.schemas import DomainConfig, SourceTierRule
+
+        config = DomainConfig(
+            domain="t",
+            geography_bbox=[0, 0, 1, 1],
+            entity_types=[],
+            source_tiers=[
+                SourceTierRule(domains=["trusted.example"], tier=1),
+                SourceTierRule(domains=[], tier=4),
+            ],
+        )
+        from ghkge.orchestrator.workers import tier_for_domain
+
+        assert tier_for_domain("trusted.example", config) == 1
+        assert tier_for_domain("other.example", config) == 4
 
 
 class TestCategoryMapping:

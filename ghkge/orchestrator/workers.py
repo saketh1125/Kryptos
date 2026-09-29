@@ -288,15 +288,37 @@ async def handle_harvest_task(task_payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def source_tier_for_domain(source_domain: str) -> int:
-    """Map a source domain to a trust tier (OFFICIAL > CURATED > SOCIAL)."""
-    d = source_domain.lower()
-    if d.endswith(".gov.in") or d.endswith(".nic.in") or d.endswith(".gov"):
-        return int(SourceTier.OFFICIAL)
-    if d.endswith(".org"):
-        return int(SourceTier.CURATED)
-    if any(s in d for s in ("wikipedia", "openstreetmap")):
-        return int(SourceTier.CURATED)
-    return int(SourceTier.SOCIAL_GENERAL)
+    """Map a source domain to a trust tier using the domain YAML.
+
+    The mapping is data (see ``source_tiers`` in config/default_domain.yaml),
+    not a hardcoded hostname heuristic: trust levels are editorial decisions
+    and must be correctable per deployment without a code change. A suffix
+    rule also got the important cases wrong -- it classed OpenStreetMap as
+    CURATED, which held every OSM safety fact for review (D-06), and pushed
+    established press into SOCIAL_GENERAL.
+
+    Matches the registrable domain, so "en.wikipedia.org" and
+    "wikipedia.org" both resolve. Unlisted sources fall back to the most
+    conservative tier in the list.
+    """
+    return tier_for_domain(source_domain, load_domain_config())
+
+
+def tier_for_domain(source_domain: str, config: DomainConfig) -> int:
+    """Resolve a source domain against the configured source_tiers rules."""
+    host = (source_domain or "").lower().strip().removeprefix("www.")
+    fallback = int(SourceTier.SOCIAL_GENERAL)
+
+    for rule in config.source_tiers:
+        domains = [d.lower().removeprefix("www.") for d in rule.domains]
+        if not domains:
+            # An empty list is the catch-all: the least-trusted tier.
+            fallback = rule.tier
+            continue
+        if any(host == d or host.endswith(f".{d}") for d in domains):
+            return rule.tier
+
+    return fallback
 
 
 async def handle_extract_task(task_payload: dict[str, Any]) -> dict[str, Any]:

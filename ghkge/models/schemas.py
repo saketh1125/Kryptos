@@ -80,6 +80,21 @@ class EntityTypeConfig(BaseModel):
     safety_relevant: bool = False
 
 
+class SourceTierRule(BaseModel):
+    """One entry in the domain's trust configuration.
+
+    ``domains`` empty means "everything not matched above" and should be the
+    last, least-trusted rule.
+    """
+
+    domains: list[str] = Field(default_factory=list)
+    tier: int = Field(
+        ge=1,
+        le=4,
+        description="1 OFFICIAL, 2 CURATED, 3 SOCIAL_VERIFIED, 4 SOCIAL_GENERAL",
+    )
+
+
 class DomainConfig(BaseModel):
     domain: str
     geography_bbox: list[float] = Field(description="[min_lat, min_lon, max_lat, max_lon]")
@@ -90,6 +105,13 @@ class DomainConfig(BaseModel):
     strategy_seeds: dict[str, list[str]] = Field(
         default_factory=dict,
         description="Seed URLs per strategy (public-access sources only)",
+    )
+    source_tiers: list[SourceTierRule] = Field(
+        default_factory=list,
+        description=(
+            "Domain -> trust tier rules, most specific first; "
+            "the last rule with an empty list is the fallback"
+        ),
     )
 
 
