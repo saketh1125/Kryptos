@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import UTC, datetime
 from typing import Protocol
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
@@ -115,7 +116,17 @@ class ComplianceEngine:
         url: str,
         strategy: str = "",
         entity_type: str = "",
+        *,
+        consume_rate_slot: bool = True,
     ) -> ComplianceResult:
+        """Run the compliance gate.
+
+        Args:
+            consume_rate_slot: Set False when the caller already paid the
+                per-domain rate limit for this fetch. The stateless checks
+                (platform policy, denylist, robots.txt) still run — they are
+                cheap and cached — but the domain slot is not charged twice.
+        """
         # 1. platform policy (cheap, before consuming any rate-limit slot)
         if self.denylist.requires_official_api(url):
             logger.info("compliance.api_only_platform", url=url)
@@ -133,7 +144,7 @@ class ComplianceEngine:
             return ComplianceResult(allowed=False, reason="robots_disallow")
 
         # 4. rate gate (consumes the domain slot only when everything else passed)
-        if self.rate_limiter is not None:
+        if consume_rate_slot and self.rate_limiter is not None:
             allowed = await self.rate_limiter.acquire(url, settings.rate_limit_interval_s)
             if not allowed:
                 logger.info("compliance.rate_limited", url=url)
@@ -152,7 +163,11 @@ class ComplianceEngine:
         strategy: str,
         entity_type: str,
     ) -> ApprovedTarget | None:
-        """Compliance-gate a URL and return an ApprovedTarget, or None if blocked."""
+        """Compliance-gate a URL and return an ApprovedTarget, or None if blocked.
+
+        The returned target is stamped so that a harvester's immediate
+        re-check does not charge the rate-limit slot a second time.
+        """
         result = await self.check(url, strategy=strategy, entity_type=entity_type)
         if not result.allowed:
             return None
@@ -161,4 +176,5 @@ class ComplianceEngine:
             domain=urlparse(url).netloc,
             strategy=strategy,
             entity_type=entity_type,
+            validated_at=datetime.now(UTC),
         )

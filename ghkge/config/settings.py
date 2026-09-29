@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     user_agent: str = "HyperlocalKnowledgeGraphEngine/1.0 (+https://github.com/saketh1125/ghkge)"
     rate_limit_interval_s: float = 2.0
     robots_cache_ttl_hours: int = 24
+    # A harvester re-checking a freshly approved target re-runs the
+    # stateless rules but does not re-charge the domain rate slot.
+    compliance_revalidate_window_s: float = 5.0
 
     # Harvesting
     max_concurrent_browsers: int = 3

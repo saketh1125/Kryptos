@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 import structlog
 
 from ghkge.compliance.engine import ComplianceEngine
+from ghkge.config.settings import settings
 from ghkge.models.schemas import ApprovedTarget, ComplianceResult, RawCaptureData
 
 logger = structlog.get_logger()
@@ -38,6 +39,18 @@ class BaseHarvester(ABC):
         return urlparse(url).netloc
 
     async def _check_compliance(self, target: ApprovedTarget) -> ComplianceResult:
+        """Re-verify a target immediately before network I/O.
+
+        Defence in depth: the stateless rules are re-run even though the
+        planner already approved this URL. The per-domain rate-limit slot is
+        *not* re-charged when the target was validated within
+        ``compliance_revalidate_window_s`` — charging it twice milliseconds
+        apart would deny the fetch it just approved (D-02).
+        """
+        already_paid = target.is_freshly_validated(settings.compliance_revalidate_window_s)
         return await self.compliance.check(
-            target.url, strategy=target.strategy, entity_type=target.entity_type
+            target.url,
+            strategy=target.strategy,
+            entity_type=target.entity_type,
+            consume_rate_slot=not already_paid,
         )

@@ -6,6 +6,7 @@ import uuid
 import httpx
 import structlog
 
+from ghkge.compliance.engine import ComplianceEngine
 from ghkge.config.settings import settings
 from ghkge.harvesters.base import BaseHarvester
 from ghkge.models.schemas import ApprovedTarget, RawCaptureData
@@ -24,7 +25,18 @@ def _get_semaphore() -> asyncio.Semaphore:
 
 
 class WebHarvester(BaseHarvester):
-    """HTML/Web harvester using httpx (crawl4ai optional failover, future)."""
+    """HTML/Web harvester using httpx (crawl4ai optional failover, future).
+
+    ``transport`` exists for tests: it is the seam the integration suite uses
+    to serve robots.txt and pages without opening a socket.
+    """
+
+    def __init__(
+        self, compliance: ComplianceEngine,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ):
+        super().__init__(compliance)
+        self._transport = transport
 
     async def fetch(self, target: ApprovedTarget, run_id: uuid.UUID) -> RawCaptureData | None:
         compliance_result = await self._check_compliance(target)
@@ -61,6 +73,7 @@ class WebHarvester(BaseHarvester):
                 timeout=30.0,
                 follow_redirects=True,
                 headers={"User-Agent": settings.user_agent},
+                transport=self._transport,
             ) as client:
                 resp = await client.get(url)
                 if resp.status_code == 200:

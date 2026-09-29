@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import IntEnum
 from typing import Literal
 
@@ -100,12 +100,28 @@ class ComplianceResult(BaseModel):
 
 
 class ApprovedTarget(BaseModel):
-    """A compliance-validated URL ready for fetching."""
+    """A compliance-validated URL ready for fetching.
+
+    ``validated_at`` records when ComplianceEngine last cleared this target.
+    A harvester re-checking immediately afterwards re-verifies the cheap,
+    stateless rules (platform, denylist, robots) but skips the rate-limit
+    gate, which has already been paid for. Without the stamp, a
+    worker-then-harvester hand-off charges the domain twice milliseconds
+    apart and the fetch is denied (D-02).
+    """
 
     url: str
     domain: str
     strategy: str
     entity_type: str
+    validated_at: datetime | None = None
+
+    def is_freshly_validated(self, window_s: float) -> bool:
+        """True if validated within ``window_s`` of now."""
+        if self.validated_at is None:
+            return False
+        age = (datetime.now(UTC) - self.validated_at).total_seconds()
+        return 0 <= age <= window_s
 
 
 class RawCaptureData(BaseModel):

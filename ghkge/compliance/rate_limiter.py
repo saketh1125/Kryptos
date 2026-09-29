@@ -36,6 +36,10 @@ class PostgresRateLimiter:
 
             if row:
                 last_hit = row["last_hit_at"]
+                # Some drivers hand back naive datetimes; normalise so the
+                # subtraction below cannot raise.
+                if last_hit.tzinfo is None:
+                    last_hit = last_hit.replace(tzinfo=UTC)
                 time_since_last = (now - last_hit).total_seconds()
                 if time_since_last < limit_interval_s:
                     logger.debug(
