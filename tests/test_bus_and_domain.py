@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from ghkge.models.schemas import DomainConfig, EntityTypeConfig
 from ghkge.orchestrator import bus
 from ghkge.orchestrator.domain import (
     STRATEGY_ENGINES,
+    DomainConfigNotFoundError,
     build_overpass_query,
     cell_for_point,
     load_domain_config,
@@ -25,6 +28,39 @@ class TestDomainConfig:
         assert config.entity_types
         names = {et.name for et in config.entity_types}
         assert "landmark" in names
+
+    def test_missing_config_names_the_paths_tried(self):
+        reset_domain_cache()
+        with pytest.raises(DomainConfigNotFoundError) as exc:
+            load_domain_config("/nope/missing.yaml")
+        assert "/nope/missing.yaml" in str(exc.value)
+        assert "GHKGE_DOMAIN_CONFIG_PATH" in str(exc.value)
+
+    def test_loads_explicit_path(self, tmp_path):
+        reset_domain_cache()
+        path = tmp_path / "custom.yaml"
+        path.write_text(
+            "domain: kashi\n"
+            "geography_bbox: [25.0, 83.0, 25.5, 83.5]\n"
+            "entity_types:\n"
+            "  - name: landmark\n"
+            "    strategies: [osm_api]\n"
+        )
+        config = load_domain_config(str(path))
+        assert config.domain == "kashi"
+        assert config.entity_types[0].strategies == ["osm_api"]
+
+    def test_cache_keys_on_resolved_path(self, tmp_path):
+        reset_domain_cache()
+        path = tmp_path / "custom.yaml"
+        path.write_text(
+            "domain: kashi\n"
+            "geography_bbox: [25.0, 83.0, 25.5, 83.5]\n"
+            "entity_types: []\n"
+        )
+        first = load_domain_config(str(path))
+        second = load_domain_config(str(path))
+        assert first is second
 
     def test_caches_by_path(self):
         reset_domain_cache()

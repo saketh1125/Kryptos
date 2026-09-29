@@ -43,18 +43,44 @@ OSM_TAG_FILTERS: dict[str, str] = {
 _config_cache: dict[str, DomainConfig] = {}
 
 
+class DomainConfigNotFoundError(FileNotFoundError):
+    """Raised when no domain YAML can be located."""
+
+
+def _resolve_config_path(path: str | None) -> Path:
+    """Locate a domain YAML, falling back to the repo-root config dir."""
+    candidates = []
+    if path:
+        candidates.append(Path(path))
+    else:
+        candidates.append(Path(settings.domain_config_path))
+        # Repo root relative to this file, for when CWD is not the project root.
+        candidates.append(Path(__file__).resolve().parents[2] / "config/default_domain.yaml")
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    raise DomainConfigNotFoundError(
+        "No domain config found. Looked for: "
+        + ", ".join(str(c) for c in candidates)
+        + ". Set GHKGE_DOMAIN_CONFIG_PATH or run from the project root."
+    )
+
+
 def load_domain_config(path: str | None = None) -> DomainConfig:
-    """Load and cache a domain YAML config."""
-    resolved = str(Path(path or settings.domain_config_path))
-    cached = _config_cache.get(resolved)
+    """Load and cache a domain YAML config. Single source of truth per path."""
+    resolved = _resolve_config_path(path)
+    key = str(resolved.resolve())
+    cached = _config_cache.get(key)
     if cached is not None:
         return cached
 
     with open(resolved) as f:
         data = yaml.safe_load(f)
     config = DomainConfig(**data)
-    _config_cache[resolved] = config
-    logger.info("domain.config_loaded", path=resolved, domain=config.domain)
+    _config_cache[key] = config
+    logger.info("domain.config_loaded", path=key, domain=config.domain)
     return config
 
 
