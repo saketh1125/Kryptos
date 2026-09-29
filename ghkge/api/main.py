@@ -8,7 +8,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from ghkge.api.routes import knowledge, orchestration
+from ghkge.config.settings import settings
 from ghkge.database.connection import close_db, init_db
+from ghkge.monitoring import configure_logging
 from ghkge.orchestrator.scheduler import start_background, stop_background
 
 logger = structlog.get_logger()
@@ -17,6 +19,7 @@ logger = structlog.get_logger()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan: DB, background workers, scheduler."""
+    configure_logging(json_output=settings.json_logging)
     logger.info("app.starting")
     await init_db()
     with contextlib.suppress(Exception):

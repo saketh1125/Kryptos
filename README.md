@@ -219,7 +219,7 @@ Kryptos/
 │   ├── compliance/              # robots engine, rate limiter
 │   ├── database/                # SQLAlchemy async models, connection
 │   ├── models/                  # pydantic schemas
-│   ├── monitoring/              # structlog setup
+│   ├── monitoring/              # structlog configuration
 │   ├── utils/                   # geohash utilities
 │   └── config/                  # settings
 ├── sql/schema.sql               # DDL reference

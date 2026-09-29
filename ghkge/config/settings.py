@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     scheduler_default_domain: str = ""
 
     # API
+    json_logging: bool = False
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 
