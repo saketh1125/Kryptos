@@ -69,7 +69,7 @@ Gap Evaluator ──▶ Planner ──▶ Harvester ──▶ Synthesis ──�
 ```
 
 1. **Gap evaluation** — a scheduled job enumerates every geohash cell covering the domain bbox, then writes severity-scored entries to the `GapQueue` for empty cells (`missing`), sparse cells (`anomaly`), and entities past their staleness cutoff (`reinforce`). Nothing is crawled for its own sake; the queue is the only trigger.
-2. **Planning** — the planner claims the highest-severity open gaps and ranks each entity type's YAML-declared strategies by historical yield (entities-per-call × novelty-rate).
+2. **Planning** — the planner claims the highest-severity open gaps and ranks each entity type's YAML-declared strategies with the doc 08 §3 formula: historical yield × source-tier weight × recency decay − normalized cost. Untried strategies score a flat exploration value, so a proven strategy that has gone dry cannot permanently crowd out one that has never run.
 3. **Harvesting** — pluggable sources behind one interface: `web` (httpx), `media` (yt-dlp + faster-whisper), `document` (docling), `api`/`api_overpass` (Overpass, gov portals). Every URL passes `ComplianceEngine.check()` and becomes an `ApprovedTarget` before any I/O.
 4. **Extraction** — raw captures are written to Postgres *first*, then chunked (800w/150o) and converted to structured facts via instructor-validated Pydantic schemas. Macro knowledge is discarded.
 5. **Consolidation** — fuzzy entity resolution (rapidfuzz, 85% threshold) merges multi-source sightings; the safety gate holds safety-relevant facts from non-official sources until corroborated; writes go Postgres → pgvector → Neo4j, rolling back Postgres if Neo4j fails.
@@ -247,8 +247,14 @@ On startup the app starts the four agent workers and the gap-evaluation schedule
 
 **Working v1.** The pipeline runs end to end on the Postgres task bus: gap-driven planning, compliance-gated multi-modal harvesting, LLM extraction, entity resolution with the safety gate, and rolled-back Trinity writes. Background workers and the gap-evaluation scheduler start with the app.
 
-**Verified by the test suite** (143 tests): geohash utilities, the compliance engine (fail-closed robots, denylist, rate-limit ordering), planner yield scoring, the safety gate, the full plan→consolidate chain including retries, duplicates, and rollback, both API surfaces, and the gap evaluator's bootstrap/staleness/anomaly scans. Only external services are mocked; the pipeline, bus, and API run against a real database.
+**Quality gates:** `ruff` clean, `mypy --strict` clean across all 40 modules, and 167 tests passing. The suite runs against a real relational database (SQLite for tests, Postgres in production) with only the true externals — compliance gate, LLM, embeddings, Neo4j — mocked. It covers the geohash utilities, the compliance engine (fail-closed robots, denylist, rate-limit ordering), the doc 08 §3 planner scoring, the safety gate, the full plan→consolidate chain including retries, duplicate suppression and rollback, both API surfaces, and the gap evaluator's bootstrap/staleness/anomaly/self-healing passes.
 
-**Not included (out of v1 scope):** yield-weighted Stage-2 planner scoring with time decay, LLM-router planning, Scrapling/OCR fallovers, and the Next.js admin console. Postgres events are polling-based; the full task-event-bus protocol in doc 12 is implemented as a polled queue rather than push.
+**Known limitations:**
+- A safety-relevant fact from a single non-official source creates no entity at all; it is held for review and merged later if a second source corroborates it. Merging into an already-corroborated entity only holds the fact.
+- Facts inherit the grid cell of the gap that produced them, so a capture spanning several cells is attributed to one.
+- `entities` carry a geohash cell, not precise coordinates; `EntityLocation` reports the cell centre and `near`/`radius_m` measure from it.
+- Semantic search degrades to substring matching when Ollama is unavailable, and Neo4j traversal falls back to same-cell neighbours when the graph is unreachable.
 
-**Not yet run against live services.** Schema (`sql/schema.sql`) has not been applied to a real Supabase/Neo4j/Ollama instance, and no live crawl has been executed.
+**Not included (out of v1 scope):** LLM-router planning (doc 04 Stage 3), Scrapling/OCR failovers, and the Next.js admin console. Postgres hand-offs are polled rather than pushed, so the task-event-bus protocol in doc 12 is a polled queue.
+
+**Not yet run against live services.** `sql/schema.sql` has not been applied to a real Supabase/Neo4j instance and no live crawl has been executed — everything above is verified against fakes and an in-memory database.
