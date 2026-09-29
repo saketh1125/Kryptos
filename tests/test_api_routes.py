@@ -159,11 +159,31 @@ async def _seed(factory):
 
 
 class TestHealthAndRouting:
-    def test_health(self, client):
+    def test_health_reports_readiness(self, client):
         c, _ = client
         r = c.get("/health")
         assert r.status_code == 200
-        assert r.json() == {"status": "ok"}
+        body = r.json()
+        assert set(body) == {"status", "ready", "problems"}
+        assert isinstance(body["ready"], bool)
+        assert isinstance(body["problems"], list)
+        # Status must agree with the problem list.
+        assert body["ready"] is (body["status"] == "ok")
+        assert body["ready"] is (not body["problems"])
+
+    def test_health_surfaces_startup_problems(self, client):
+        """D-08: a degraded app must say so instead of reporting ok."""
+        c, _ = client
+        from ghkge.api.main import app
+
+        app.state.startup_problems = ["database schema is missing"]
+        try:
+            body = c.get("/health").json()
+            assert body["ready"] is False
+            assert body["status"] == "degraded"
+            assert "schema" in body["problems"][0]
+        finally:
+            app.state.startup_problems = []
 
     def test_knowledge_routes_are_prefixed(self, client):
         c, _ = client

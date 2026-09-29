@@ -72,7 +72,11 @@ async def get_compliance() -> ComplianceEngine:
             import asyncpg
 
             db_url = settings.database_url.replace("+asyncpg", "")
-            _pg_pool = await asyncpg.create_pool(db_url, min_size=2, max_size=5)
+            _pg_pool = await asyncpg.create_pool(
+                db_url,
+                min_size=settings.rate_limiter_pool_min,
+                max_size=settings.rate_limiter_pool_max,
+            )
             rate_limiter = PostgresRateLimiter(_pg_pool)
         except Exception:
             logger.warning("worker.rate_limiter_init_failed", exc_info=True)

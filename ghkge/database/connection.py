@@ -22,19 +22,51 @@ class Base(DeclarativeBase):
 
 
 async def init_db() -> AsyncEngine:
-    """Initialize the async database engine and session factory."""
+    """Initialize the async database engine and session factory.
+
+    Pool sizing matters on managed free tiers: Supabase's smallest plans cap
+    total connections (15 on the free tier), and the worker rate-limiter holds
+    a second, independent asyncpg pool. Both are bounded by settings so a
+    deployment can fit inside the provider's limit.
+    """
     global engine, async_session_factory
 
     engine = create_async_engine(
         settings.database_url,
         echo=False,
-        pool_size=5,
-        max_overflow=10,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
         pool_pre_ping=True,
     )
     async_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-    logger.info("database.engine_initialized", database_url=settings.database_url.split("@")[-1])
+    logger.info(
+        "database.engine_initialized",
+        host=settings.database_url.split("@")[-1],
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+    )
     return engine
+
+
+async def schema_is_current() -> bool:
+    """True if the database already has the tables the app queries.
+
+    A missing schema is otherwise invisible: the app boots, the workers start,
+    and every query fails with a relation error logged once per poll.
+    """
+    if engine is None:
+        return False
+    from sqlalchemy import text
+
+    try:
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                text("SELECT to_regclass('public.task_queue') IS NOT NULL")
+            )
+            return bool(result.scalar())
+    except Exception:
+        logger.warning("database.schema_probe_failed", exc_info=True)
+        return False
 
 
 async def get_session() -> AsyncSession:  # type: ignore[misc]

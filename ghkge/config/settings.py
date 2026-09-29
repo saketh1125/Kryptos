@@ -7,6 +7,13 @@ class Settings(BaseSettings):
     # Postgres (Supabase)
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/ghkge"
 
+    # Pool sizing. Supabase free tier caps total connections at 15, and the
+    # worker rate-limiter opens its own asyncpg pool on top of this one.
+    db_pool_size: int = 5
+    db_max_overflow: int = 5
+    rate_limiter_pool_min: int = 1
+    rate_limiter_pool_max: int = 3
+
     # Neo4j
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
